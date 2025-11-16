@@ -1,13 +1,13 @@
-"""Binance 1-second OHLCV download helpers."""
 from __future__ import annotations
 
 import time
 from collections import deque
 from datetime import datetime
 from pathlib import Path
-from typing import Deque, Dict, Iterable
+from typing import Deque, Dict, Iterable, Any
 
 import warnings
+import logging
 
 import pandas as pd
 import requests
@@ -174,7 +174,6 @@ def _detect_timestamp_unit(series: pd.Series) -> str:
 
 
 def _read_last_rows(path: Path, tail_rows: int) -> pd.DataFrame:
-    path = Path(path)
     if tail_rows <= 0:
         raise ValueError("tail_rows must be a positive integer.")
     chunksize = max(tail_rows, 200_000)
@@ -200,43 +199,58 @@ def _read_last_rows(path: Path, tail_rows: int) -> pd.DataFrame:
     return combined
 
 
-def _read_cached_csv(path: Path, **kwargs) -> pd.DataFrame:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"Cached OHLCV file not found at {path}")
-    try:
-        return pd.read_csv(path, **kwargs)
-    except pd.errors.EmptyDataError as exc:
-        raise ValueError(f"Cached OHLCV at {path} is empty.") from exc
-    except pd.errors.ParserError as exc:
-        raise ValueError(f"Failed to parse cached OHLCV at {path}: {exc}") from exc
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"Could not decode cached OHLCV at {path}: {exc}") from exc
-
-
 def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
-    path = Path(path)
-    kwargs = {"low_memory": False}
+    kwargs: dict[str, Any] = {"low_memory": False}
     if tail_rows is not None:
         df = _read_last_rows(path, tail_rows)
     else:
-        df = _read_cached_csv(path, **kwargs)
+        # Ensure Path objects are converted to strings for pandas and
+        # coerce the timestamp column to string to avoid premature
+        # interpretation by pandas which can complicate later parsing.
+        read_kwargs: dict[str, Any] = dict(kwargs)
+        # merge dtype dicts if present
+        existing_dtype = read_kwargs.get("dtype")
+        if existing_dtype is None:
+            read_kwargs["dtype"] = {"timestamp": str}
+        elif isinstance(existing_dtype, dict):
+            merged = {**existing_dtype, "timestamp": str}
+            read_kwargs["dtype"] = merged
+        # pass path as str to avoid potential engine/path issues
+        df = pd.read_csv(str(path), **read_kwargs)
+    logger = logging.getLogger(__name__)
     df = _align_columns(df)
-
     ts_unit = _detect_timestamp_unit(df["timestamp"])
+    # parse timestamps according to detected unit (coerce invalid)
+    # When _detect_timestamp_unit returns "auto" we must let pandas infer
+    # the format by NOT passing the `unit` argument. Passing an invalid
+    # unit like "auto" causes all values to become NaT.
     if ts_unit == "auto":
-        # 문자열/이미 datetime 컬럼은 unit 없이 자동 파싱
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
     else:
-        # 숫자형 에포크 값은 추정한 unit으로 파싱
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit=ts_unit, errors="coerce")
     mask = df["timestamp"].notna()
     if not mask.any():
+        logger.error("Parsed timestamps contain NaN after conversion for all loaded rows (path=%s)", path)
+        # write a small sample to help debugging
+        try:
+            sample_path = Path("dataset") / "bad_timestamps_all.csv"
+            sample_path.parent.mkdir(parents=True, exist_ok=True)
+            df.head(200).to_csv(sample_path, index=False)
+            logger.error("Wrote sample of problematic rows to %s", sample_path)
+        except Exception:
+            logger.exception("Failed to write bad timestamp sample to disk")
         raise ValueError("Parsed timestamps contain NaN after conversion.")
     if not mask.all():
+        bad = df.loc[~mask]
+        try:
+            bad_path = Path("dataset") / "bad_timestamps_sample.csv"
+            bad_path.parent.mkdir(parents=True, exist_ok=True)
+            bad.head(1000).to_csv(bad_path, index=False)
+            logger.warning("Dropped %d rows with unparseable timestamps; sample saved to %s", len(bad), bad_path)
+        except Exception:
+            logger.exception("Failed to write bad timestamp sample while dropping rows.")
         warnings.warn(
-            "Dropped rows with unparseable timestamps from cached data; "
-            "see `dataset` for the original rows.",
+            "Dropped rows with unparseable timestamps from cached data; see `dataset/bad_timestamps_sample.csv` for examples.",
             stacklevel=2,
         )
         df = df.loc[mask]
