@@ -3,3 +3,4 @@ numpy>=1.25
 matplotlib>=3.8
 torch>=2.6.0,<2.8
 requests>=2.31
+Django>=5.0
