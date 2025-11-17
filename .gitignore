@@ -20,3 +20,6 @@ dataset/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Personal local notes
+local_notes.md
