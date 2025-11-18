@@ -23,3 +23,9 @@ dataset/
 
 # Personal local notes
 local_notes.md
+
+#wandb 로그파일
+wandb/
+
+# env파일
+.env
