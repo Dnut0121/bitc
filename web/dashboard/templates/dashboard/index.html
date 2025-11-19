@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <title>BITC Bitcoin Pressure Dashboard</title>
+    <style>
+      :root {
+        --bg: #050711;
+        --bg-card: #101321;
+        --bg-card-soft: #151827;
+        --accent: #f7931a;
+        --accent-soft: rgba(247, 147, 26, 0.18);
+        --up: #16c784;
+        --down: #ea3943;
+        --text-main: #f9fafb;
+        --text-muted: #9ca3af;
+        --border-subtle: #1f2933;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: radial-gradient(circle at top left, #1b2236 0, #050711 55%, #000 100%);
+        color: var(--text-main);
+      }
+      .shell {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 24px 16px 40px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 24px;
+      }
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .brand-logo {
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        background: radial-gradient(circle at 30% 30%, #fff 0, #f7931a 25%, #ef6c00 60%, #8e3e00 100%);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: #111827;
+        font-weight: 800;
+        font-size: 18px;
+      }
+      .brand-text-main {
+        font-weight: 600;
+        letter-spacing: 0.04em;
+      }
+      .brand-text-sub {
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .tag {
+        border-radius: 999px;
+        padding: 4px 10px;
+        background: rgba(31, 41, 55, 0.7);
+        border: 1px solid rgba(75, 85, 99, 0.7);
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      main {
+        display: flex;
+        flex-direction: column;
+        gap: 18px;
+      }
+      .grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 14px;
+      }
+      @media (max-width: 900px) {
+        .grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 640px) {
+        .grid {
+          grid-template-columns: minmax(0, 1fr);
+        }
+        header {
+          flex-direction: column;
+          align-items: flex-start;
+          gap: 10px;
+        }
+      }
+      .card {
+        background: linear-gradient(145deg, var(--bg-card) 0, #060814 100%);
+        border-radius: 16px;
+        padding: 14px 16px;
+        border: 1px solid rgba(31, 41, 55, 0.85);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.7);
+      }
+      .card-soft {
+        background: radial-gradient(circle at top left, #1b2236 0, var(--bg-card-soft) 55%, #050814 100%);
+      }
+      .card-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 8px;
+      }
+      .label {
+        font-size: 12px;
+        color: var(--text-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+      }
+      .metric-main {
+        font-size: 26px;
+        font-weight: 700;
+      }
+      .metric-sub {
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      .chip {
+        border-radius: 999px;
+        padding: 3px 10px;
+        font-size: 11px;
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        background: rgba(15, 23, 42, 0.85);
+        color: var(--text-muted);
+      }
+      .chip-up {
+        color: var(--up);
+        border-color: rgba(22, 199, 132, 0.35);
+        background: rgba(22, 199, 132, 0.1);
+      }
+      .chip-down {
+        color: var(--down);
+        border-color: rgba(234, 57, 67, 0.35);
+        background: rgba(234, 57, 67, 0.08);
+      }
+      .chip-neutral {
+        color: var(--accent);
+        border-color: rgba(247, 147, 26, 0.45);
+        background: var(--accent-soft);
+      }
+      .error {
+        margin-bottom: 16px;
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid rgba(239, 68, 68, 0.7);
+        background: rgba(127, 29, 29, 0.4);
+        color: #fecaca;
+        font-size: 13px;
+      }
+      .section-title {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.12em;
+        color: var(--text-muted);
+        margin-bottom: 6px;
+      }
+      .section-row {
+        display: grid;
+        grid-template-columns: 2fr 3fr;
+        gap: 14px;
+      }
+      @media (max-width: 900px) {
+        .section-row {
+          grid-template-columns: minmax(0, 1fr);
+        }
+      }
+      .table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+      }
+      .table th,
+      .table td {
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .table th {
+        text-align: left;
+        color: var(--text-muted);
+        font-weight: 500;
+        font-size: 11px;
+      }
+      .table tbody tr:nth-child(even) {
+        background: rgba(15, 23, 42, 0.4);
+      }
+      .value-up {
+        color: var(--up);
+      }
+      .value-down {
+        color: var(--down);
+      }
+      .value-muted {
+        color: var(--text-muted);
+      }
+      .meta {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 10px;
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .meta span {
+        opacity: 0.9;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 3px 9px;
+        border-radius: 999px;
+        background: rgba(17, 24, 39, 0.85);
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .pill-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+      }
+      .pill-dot-up {
+        background: var(--up);
+      }
+      .pill-dot-down {
+        background: var(--down);
+      }
+      .pill-dot-neutral {
+        background: var(--accent);
+      }
+      .form-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 6px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+        min-width: 110px;
+        max-width: 140px;
+      }
+      .field label {
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .field input {
+        background: rgba(15, 23, 42, 0.9);
+        border-radius: 8px;
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        padding: 5px 8px;
+        font-size: 12px;
+        color: var(--text-main);
+      }
+      .field input:focus {
+        outline: none;
+        border-color: var(--accent);
+        box-shadow: 0 0 0 1px rgba(247, 147, 26, 0.5);
+      }
+      .btn {
+        margin-top: 17px;
+        padding: 7px 14px;
+        border-radius: 999px;
+        border: none;
+        background: linear-gradient(135deg, #f7931a 0, #fcb045 35%, #ff8a00 100%);
+        color: #111827;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        box-shadow: 0 10px 25px rgba(0, 0, 0, 0.7);
+      }
+      .btn:hover {
+        filter: brightness(1.05);
+      }
+      .hint {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <header>
+        <div class="brand">
+          <div class="brand-logo">₿</div>
+          <div>
+            <div class="brand-text-main">BITC / BTCUSDT</div>
+            <div class="brand-text-sub">1초 캔들 기반 매수·매도 압력 LSTM 시그널</div>
+          </div>
+        </div>
+        <div class="tag">Experimental Quant Dashboard · dev only</div>
+      </header>
+
+      {% if error_message %}
+        <div class="error">
+          대시보드를 로딩하는 중 에러가 발생했습니다:<br />
+          {{ error_message }}
+        </div>
+      {% endif %}
+
+      {% if snapshot %}
+        <main>
+          <section>
+            <div class="section-title">Now · 현재 캔들 스냅샷</div>
+            <div class="grid">
+              <div class="card card-soft">
+                <div class="card-header">
+                  <span class="label">모델 시그널</span>
+                  {% if trade and trade.current %}
+                    {% if trade.current.expected_profit_pct > 0 %}
+                      <span class="chip chip-up">양(+) 기대 수익 구간</span>
+                    {% elif trade.current.expected_profit_pct < 0 %}
+                      <span class="chip chip-down">음(-) 기대 수익 구간</span>
+                    {% else %}
+                      <span class="chip chip-neutral">중립 구간</span>
+                    {% endif %}
+                  {% else %}
+                    <span class="chip chip-neutral">모델 결과</span>
+                  {% endif %}
+                </div>
+                <div class="metric-main">
+                  {{ snapshot.prob_up|floatformat:3 }}
+                  <span class="metric-sub">prob_up</span>
+                </div>
+                <div class="meta">
+                  <span>캔들: {{ snapshot.timestamp }}</span>
+                  <span>디바이스: {{ snapshot.device }}</span>
+                  <span>Lookback: {{ snapshot.lookback }}초 · Tail: {{ snapshot.tail_rows }}행</span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">가격 / 변동</span>
+                  {% if snapshot.price_close and snapshot.price_open %}
+                    {% with diff=snapshot.price_close|floatformat:2|add:"-0" %}
+                    {% endwith %}
+                  {% endif %}
+                </div>
+                <div class="metric-main">
+                  {{ snapshot.price_close|floatformat:2 }}
+                  <span class="metric-sub">USDT</span>
+                </div>
+                <div class="meta">
+                  <span>O {{ snapshot.price_open|floatformat:2 }}</span>
+                  <span>H {{ snapshot.price_high|floatformat:2 }}</span>
+                  <span>L {{ snapshot.price_low|floatformat:2 }}</span>
+                  <span>C {{ snapshot.price_close|floatformat:2 }}</span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">검증 성능</span>
+                  <span class="chip">validation</span>
+                </div>
+                <div class="metric-main">
+                  {{ snapshot.val_accuracy|floatformat:3 }}
+                  <span class="metric-sub">val acc</span>
+                </div>
+                <div class="meta">
+                  <span>loss {{ snapshot.val_loss|floatformat:4 }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <div class="section-row">
+              <div>
+                <div class="section-title">Trade Simulation · 손익 시나리오</div>
+                <div class="card">
+                  <form method="get">
+                    <div class="form-row">
+                      <div class="field">
+                        <label for="prob_threshold">prob_up ≥</label>
+                        <input
+                          id="prob_threshold"
+                          name="prob_threshold"
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          max="1"
+                          value="{{ config.prob_threshold }}"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="horizon">보유 시간 (초)</label>
+                        <input
+                          id="horizon"
+                          name="horizon"
+                          type="number"
+                          min="1"
+                          value="{{ config.horizon }}"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="risk_reward">손익비 (목표:손절)</label>
+                        <input
+                          id="risk_reward"
+                          name="risk_reward"
+                          type="number"
+                          step="0.1"
+                          min="0.1"
+                          value="{{ config.risk_reward }}"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="min_expected_pct">최소 기대 수익률 (%)</label>
+                        <input
+                          id="min_expected_pct"
+                          name="min_expected_pct"
+                          type="number"
+                          step="0.1"
+                          value="{{ config.min_expected_pct }}"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="fee_rate">수수료 비율</label>
+                        <input
+                          id="fee_rate"
+                          name="fee_rate"
+                          type="number"
+                          step="0.0001"
+                          value="{{ config.fee_rate }}"
+                        />
+                      </div>
+                      <div class="field">
+                        <label for="slippage_rate">슬리피지 비율</label>
+                        <input
+                          id="slippage_rate"
+                          name="slippage_rate"
+                          type="number"
+                          step="0.0001"
+                          value="{{ config.slippage_rate }}"
+                        />
+                      </div>
+                      <button class="btn" type="submit">시뮬레이션 업데이트</button>
+                    </div>
+                    <div class="hint">
+                      위 파라미터는 모델이 계산한 과거·현재 구간의 단순 손익 시나리오를 바꾸는 값입니다.
+                      실제 매매 판단에는 리스크 관리와 슬리피지, 체결 상황 등을 추가로 고려해야 합니다.
+                    </div>
+                  </form>
+                </div>
+
+                {% if trade and trade.current %}
+                  <div style="height: 8px"></div>
+                  <div class="card">
+                    <div class="card-header">
+                      <span class="label">현재 캔들 기준 기대 수익</span>
+                      {% if trade.current.expected_profit_pct > 0 %}
+                        <div class="pill">
+                          <span class="pill-dot pill-dot-up"></span>
+                          <span>양(+) 기대값 구간</span>
+                        </div>
+                      {% elif trade.current.expected_profit_pct < 0 %}
+                        <div class="pill">
+                          <span class="pill-dot pill-dot-down"></span>
+                          <span>음(-) 기대값 구간</span>
+                        </div>
+                      {% else %}
+                        <div class="pill">
+                          <span class="pill-dot pill-dot-neutral"></span>
+                          <span>중립</span>
+                        </div>
+                      {% endif %}
+                    </div>
+                    <div class="metric-main">
+                      {{ trade.current.expected_profit_pct|floatformat:3 }}%
+                      <span class="metric-sub">expected PnL</span>
+                    </div>
+                    <div class="meta">
+                      <span>가정 매수가: {{ trade.current.entry_price|floatformat:2 }} USDT</span>
+                      <span>목표가: {{ trade.current.target_price|floatformat:2 }}</span>
+                      <span>손절가: {{ trade.current.stop_price|floatformat:2 }}</span>
+                      <span>수수료+슬리피지: {{ trade.current.total_cost_rate|floatformat:4 }}</span>
+                    </div>
+                  </div>
+                {% endif %}
+              </div>
+
+              <div>
+                <div class="section-title">Historical Opportunity · 과거 데이터 기준 최적 구간</div>
+                <div class="card">
+                  {% if trade and trade.best_trade %}
+                    <table class="table">
+                      <thead>
+                        <tr>
+                          <th>구분</th>
+                          <th>값</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr>
+                          <td>진입 시점</td>
+                          <td class="value-muted">{{ trade.best_trade.entry_time }}</td>
+                        </tr>
+                        <tr>
+                          <td>진입 가격</td>
+                          <td>{{ trade.best_trade.entry_price|floatformat:2 }} USDT</td>
+                        </tr>
+                        <tr>
+                          <td>청산 시점</td>
+                          <td class="value-muted">{{ trade.best_trade.exit_time }}</td>
+                        </tr>
+                        <tr>
+                          <td>청산 가격</td>
+                          <td>{{ trade.best_trade.exit_price|floatformat:2 }} USDT</td>
+                        </tr>
+                        <tr>
+                          <td>순익 (수수료/슬리피지 반영)</td>
+                          <td>
+                            {% if trade.best_trade.profit_pct >= 0 %}
+                              <span class="value-up">
+                                {{ trade.best_trade.profit|floatformat:4 }} ({{ trade.best_trade.profit_pct|floatformat:3 }}%)
+                              </span>
+                            {% else %}
+                              <span class="value-down">
+                                {{ trade.best_trade.profit|floatformat:4 }} ({{ trade.best_trade.profit_pct|floatformat:3 }}%)
+                              </span>
+                            {% endif %}
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  {% else %}
+                    <div class="hint">
+                      현재 설정(prob_up ≥ {{ config.prob_threshold }}, 보유 {{ config.horizon }}초 등)을 만족하는
+                      고확률 구간을 찾지 못했습니다. 파라미터를 조금 완화해서 다시 시도해 볼 수 있습니다.
+                    </div>
+                  {% endif %}
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <section>
+            <div class="section-title">Recent Flow · 최근 {{ recent_summary.window }}초 시그널</div>
+            <div class="card">
+              {% if recent_summary and recent_rows %}
+                <div class="meta" style="margin-bottom: 8px">
+                  <span>평균 prob_up: {{ recent_summary.avg_prob_up|floatformat:3 }}</span>
+                  <span>prob_up ≥ 0.55 비중: {{ recent_summary.bullish_ratio|floatformat:1 }}%</span>
+                  <span>매수 우위(signal&gt;0) 비중: {{ recent_summary.signal_up_ratio|floatformat:1 }}%</span>
+                </div>
+                <div style="max-height: 260px; overflow: auto">
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th>시각</th>
+                        <th>종가</th>
+                        <th>prob_up</th>
+                        <th>signal</th>
+                        <th>buy_ratio</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for row in recent_rows %}
+                        <tr>
+                          <td class="value-muted">{{ row.timestamp }}</td>
+                          <td>{{ row.close|floatformat:2 }}</td>
+                          <td>
+                            {% if row.prob_up >= 0.55 %}
+                              <span class="value-up">{{ row.prob_up|floatformat:3 }}</span>
+                            {% elif row.prob_up <= 0.45 %}
+                              <span class="value-down">{{ row.prob_up|floatformat:3 }}</span>
+                            {% else %}
+                              {{ row.prob_up|floatformat:3 }}
+                            {% endif %}
+                          </td>
+                          <td>
+                            {% if row.signal > 0 %}
+                              <span class="value-up">+1</span>
+                            {% elif row.signal < 0 %}
+                              <span class="value-down">-1</span>
+                            {% else %}
+                              0
+                            {% endif %}
+                          </td>
+                          <td>{{ row.buy_ratio|floatformat:3 }}</td>
+                        </tr>
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+              {% else %}
+                <div class="hint">
+                  최근 구간에 대한 시그널 요약 데이터를 찾을 수 없습니다. CSV 길이나 lookback 설정을 확인해 주세요.
+                </div>
+              {% endif %}
+            </div>
+          </section>
+        </main>
+      {% else %}
+        <div class="error">표시할 스냅샷 데이터가 없습니다. CSV 경로와 데이터셋 준비 상태를 먼저 확인해 주세요.</div>
+      {% endif %}
+    </div>
+  </body>
+</html>
