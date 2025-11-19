@@ -4,15 +4,28 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
 
 from .data import download_per_second_ohlcv, load_ohlcv
-from .model import ModelResult, build_sequences, train_lstm
+from .model import (
+    ModelResult,
+    build_sequences,
+    train_lstm,
+    save_model_checkpoint,
+    load_model_checkpoint,
+)
 from .pressure import compute_pressure
+
+try:
+    import wandb  # type: ignore[import]
+    from wandb import Table as WandbTable  # type: ignore[import]
+except Exception:  # pragma: no cover - optional dependency
+    wandb = None  # type: ignore[assignment]
+    WandbTable = None  # type: ignore[assignment]
 
 
 def prepare_dataframe(args: argparse.Namespace) -> pd.DataFrame:
@@ -113,7 +126,8 @@ def suggest_trades(
         roundtrip_cost = total_cost_rate * (entry_price + exit_price)
         net_profit = gross_profit - roundtrip_cost
         net_profit_pct = net_profit / entry_price * 100.0 if entry_price != 0 else 0.0
-        if best_trade is None or net_profit_pct > best_trade["net_profit_pct"]:
+        # best_trade 딕셔너리에서는 키 이름을 profit_pct로 사용하므로 그에 맞게 비교한다.
+        if best_trade is None or net_profit_pct > best_trade["profit_pct"]:
             best_trade = {
                 "entry_time": entry_row[timestamp_col],
                 "entry_price": entry_price,
@@ -189,6 +203,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="Ignore cached CSV and always fetch fresh data.",
     )
     parser.add_argument("--window", type=int, default=60, help="Lookback in seconds for imbalance signal.")
+    parser.add_argument(
+        "--max-sequences",
+        type=int,
+        help="한 번에 학습할 최대 시퀀스 개수 (메모리 보호용). 지정하지 않으면 내부 기본값(약 50만 시퀀스)을 사용합니다.",
+    )
     parser.add_argument("--epochs", type=int, default=20, help="Training epochs for the LSTM.")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size.")
     parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate for Adam.")
@@ -235,6 +254,46 @@ def main(argv: Sequence[str] | None = None) -> None:
         default=0.0003,
         help="한 번 체결될 때 슬리피지 비율 (예: 0.0001 = 0.01%).",
     )
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Weights & Biases에 학습 결과와 시계열 데이터를 로깅합니다.",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        help="Weights & Biases 프로젝트 이름 (지정하지 않으면 'bitc').",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        help="Weights & Biases 엔터티(팀/사용자 이름).",
+    )
+    parser.add_argument(
+        "--wandb-run-name",
+        help="Weights & Biases에서 사용할 런 이름.",
+    )
+    parser.add_argument(
+        "--load-model",
+        type=Path,
+        help="기존 LSTM 체크포인트에서 가중치를 불러와 이어서 학습합니다.",
+    )
+    parser.add_argument(
+        "--incremental-start-ts",
+        help="증분 학습 시, 이 타임스탬프 이후의 데이터만 사용합니다 (run_pipeline에서 자동으로 설정).",
+    )
+    parser.add_argument(
+        "--incremental-end-ts",
+        help="증분 학습 시, 이 타임스탬프 이전의 데이터만 사용합니다 (run_pipeline에서 자동으로 설정).",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="스냅샷/트레이드 제안 출력 없이 조용히 학습만 수행합니다.",
+    )
+    parser.add_argument(
+        "--save-model",
+        type=Path,
+        help="학습된 LSTM 체크포인트를 저장할 경로 (예: models/btc_lstm.pt).",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
     # configure logging for CLI
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s:%(name)s: %(message)s")
@@ -242,9 +301,149 @@ def main(argv: Sequence[str] | None = None) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"기기 사용: {device}")
 
+    # 선택적으로 기존 체크포인트에서 모델을 불러와 이어서 학습
+    initial_model = None
+    if args.load_model is not None:
+        ckpt_path = args.load_model
+        if not ckpt_path.exists():
+            logger.warning("지정한 체크포인트가 존재하지 않습니다: %s", ckpt_path)
+        else:
+            try:
+                initial_model, _, _, ckpt_lookback = load_model_checkpoint(ckpt_path, device=device)
+                if ckpt_lookback != args.window:
+                    logger.warning(
+                        "체크포인트의 lookback(%d)과 현재 window(%d)가 다릅니다. 그래도 이어서 학습을 진행합니다.",
+                        ckpt_lookback,
+                        args.window,
+                    )
+                logger.info("기존 체크포인트에서 모델을 불러와 이어서 학습합니다: %s", ckpt_path)
+            except Exception:
+                logger.exception("체크포인트 로딩 중 오류가 발생했습니다. 새 모델로 학습을 진행합니다.")
+                initial_model = None
+
+    # 선택적으로 wandb 세션 시작
+    wandb_run = None
+    if getattr(args, "wandb", False):
+        if wandb is None:
+            logger.warning("wandb 패키지가 설치되어 있지 않아 W&B 로깅을 건너뜁니다.")
+        else:
+            # 청크 학습 시 wandb 그룹을 "YYYY-MM-DD" 형식으로 묶어서
+            # 하루 단위로 결과를 한눈에 볼 수 있게 한다.
+            wandb_group: str | None = None
+            start_ts_str = getattr(args, "incremental_start_ts", None)
+            if start_ts_str:
+                try:
+                    ts = pd.to_datetime(start_ts_str)
+                    wandb_group = ts.strftime("%Y-%m-%d")
+                except Exception:
+                    logger.exception("incremental_start_ts로부터 wandb 그룹(일)을 계산하지 못했습니다.")
+
+            config = {
+                "symbol": args.symbol,
+                "window": args.window,
+                "epochs": args.epochs,
+                "batch_size": args.batch_size,
+                "lr": args.lr,
+                "grad_clip": args.grad_clip,
+                "prob_threshold": args.prob_threshold,
+                "horizon": args.horizon,
+                "risk_reward": args.risk_reward,
+                "fee_rate": args.fee_rate,
+                "slippage_rate": args.slippage_rate,
+            }
+            wandb_run = wandb.init(
+                project=args.wandb_project or "bitc",
+                entity=args.wandb_entity,
+                name=args.wandb_run_name,
+                group=wandb_group,
+                config=config,
+            )
+
+    # 증분 학습(start_ts 기반)을 사용할 때는 CSV 전체를 로드해서
+    # 메모리 상에서 필터링해야 tail_rows와 충돌하지 않는다.
+    if getattr(args, "incremental_start_ts", None) is not None and getattr(args, "tail_rows", None) is not None:
+        logger.info(
+            "Incremental mode 활성화: tail_rows(%s)는 무시하고 전체 CSV를 로드합니다.",
+            str(args.tail_rows),
+        )
+        args.tail_rows = None
+
     df = prepare_dataframe(args)
+
+    # run_pipeline에서 넘어온 증분 학습 시간 범위가 있으면 여기서 필터링한다.
+    start_ts_str = getattr(args, "incremental_start_ts", None)
+    end_ts_str = getattr(args, "incremental_end_ts", None)
+    if start_ts_str or end_ts_str:
+        try:
+            before_rows = len(df)
+            if start_ts_str:
+                inc_start = pd.to_datetime(start_ts_str)
+                df = df[df.index > inc_start]
+            if end_ts_str:
+                inc_end = pd.to_datetime(end_ts_str)
+                df = df[df.index < inc_end]
+            logger.info(
+                "Incremental filter applied in CLI: start_ts=%s end_ts=%s rows %d -> %d",
+                start_ts_str,
+                end_ts_str,
+                before_rows,
+                len(df),
+            )
+        except Exception:
+            logger.exception("incremental_start_ts / incremental_end_ts를 파싱하는 동안 오류가 발생했습니다. 전체 데이터로 계속 진행합니다.")
+
     pressured = compute_pressure(df)
-    sequences, targets, indexes = build_sequences(pressured, args.window)
+
+    # 최소한 window+1 개의 샘플이 없으면 시퀀스를 만들 수 없으므로
+    # 친절한 로그를 남기고 조용히 종료한다.
+    min_required = args.window + 1
+    if len(pressured) < min_required:
+        logger.error(
+            "Not enough samples after preprocessing to build sequences: "
+            "rows=%d, required(min)=%d (window=%d). Training is skipped.",
+            len(pressured),
+            min_required,
+            args.window,
+        )
+        print(
+            f"[cli] 사용할 수 있는 캔들 수가 부족해서 (rows={len(pressured)}, "
+            f"최소 필요={min_required}) 이번에는 학습을 건너뜁니다. "
+            "BITC_TAIL_ROWS / BITC_START / BITC_END / 증분 학습 설정을 확인해 주세요."
+        )
+        if wandb_run is not None:
+            wandb_run.finish()
+        return
+
+    # build_sequences에서 실제로 몇 개의 시퀀스를 만들었는지 로그로 남긴다.
+    try:
+        sequences, targets, indexes = build_sequences(
+            pressured,
+            args.window,
+            max_sequences=args.max_sequences,
+        )
+    except ValueError as exc:
+        logger.error(
+            "Failed to build sequences (window=%d, max_sequences=%s, rows=%d): %s",
+            args.window,
+            str(args.max_sequences) if args.max_sequences is not None else "default",
+            len(pressured),
+            exc,
+        )
+        print(
+            "[cli] 시퀀스를 생성하는 데 필요한 데이터가 부족하거나 설정이 잘못되었습니다. "
+            "window / max-sequences / TAIL_ROWS / 증분 학습 범위를 다시 확인해 주세요."
+        )
+        if wandb_run is not None:
+            wandb_run.finish()
+        return
+
+    logger.info(
+        "build_sequences: window=%d, max_sequences=%s -> actual_sequences=%d, rows_used=%d",
+        args.window,
+        str(args.max_sequences) if args.max_sequences is not None else "default",
+        len(sequences),
+        len(pressured),
+    )
     result = train_lstm(
         sequences,
         targets,
@@ -256,17 +455,35 @@ def main(argv: Sequence[str] | None = None) -> None:
         args.lr,
         device=device,
         grad_clip=args.grad_clip,
+        model=initial_model,
     )
-    print_snapshot(result, args.window)
-    suggest_trades(
-        result,
-        args.window,
-        prob_threshold=args.prob_threshold,
-        horizon=args.horizon,
-        risk_reward=args.risk_reward,
-        fee_rate=args.fee_rate,
-        slippage_rate=args.slippage_rate,
-        min_expected_pct=args.min_expected_pct,
-    )
+    # wandb에 검증 지표 및 시계열 일부를 업로드
+    if wandb_run is not None and wandb is not None and WandbTable is not None:
+        # 최종 검증 지표
+        wandb_run.log({"val_loss": result.loss, "val_accuracy": result.accuracy})
+        # 최근 구간 시계열 (가격, 확률 등) 테이블로 업로드
+        tail_df = result.data.tail(1000).reset_index()
+        table = WandbTable(dataframe=tail_df)
+        wandb_run.log({"predictions": table})
+
+    # 옵션이 주어진 경우 학습된 모델을 체크포인트로 저장
+    if args.save_model is not None:
+        save_model_checkpoint(result, args.window, args.save_model)
+
+    if not args.quiet:
+        print_snapshot(result, args.window)
+        suggest_trades(
+            result,
+            args.window,
+            prob_threshold=args.prob_threshold,
+            horizon=args.horizon,
+            risk_reward=args.risk_reward,
+            fee_rate=args.fee_rate,
+            slippage_rate=args.slippage_rate,
+            min_expected_pct=args.min_expected_pct,
+        )
     if args.plot:
         plot_summary(result, args.window)
+
+    if wandb_run is not None:
+        wandb_run.finish()
