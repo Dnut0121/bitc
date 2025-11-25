@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pandas as pd
 from django.conf import settings
-from django.http import HttpRequest, HttpResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
 
 
@@ -16,6 +16,7 @@ DEFAULT_MIN_EXPECTED_PCT = 0.0
 DEFAULT_FEE_RATE = 0.0006
 DEFAULT_SLIPPAGE_RATE = 0.0003
 RECENT_ROWS = 30
+CHART_CANDLES = 300
 
 
 def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
@@ -59,6 +60,28 @@ def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
         "device": meta.get("device", "offline"),
     }
     return snapshot, df, meta
+
+
+def _prepare_candles(df: pd.DataFrame, limit: int = CHART_CANDLES) -> list[dict]:
+    """차트용 OHLCV 캔들 시퀀스를 반환합니다."""
+    required = {"open", "high", "low", "close", "volume"}
+    if not required.issubset(df.columns):
+        return []
+
+    data = df.tail(limit)
+    candles: list[dict] = []
+    for ts, row in data.iterrows():
+        candles.append(
+            {
+                "timestamp": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
+                "open": float(row.get("open", float("nan"))),
+                "high": float(row.get("high", float("nan"))),
+                "low": float(row.get("low", float("nan"))),
+                "close": float(row.get("close", float("nan"))),
+                "volume": float(row.get("volume", float("nan"))),
+            }
+        )
+    return candles
 
 
 def _compute_trade_analysis(
@@ -229,6 +252,7 @@ def index(request: HttpRequest) -> HttpResponse:
             min_expected_pct=min_expected_pct,
         )
         recent_summary, recent_rows = _compute_recent_view(df)
+        context["candles"] = _prepare_candles(df)
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
 
@@ -246,4 +270,22 @@ def index(request: HttpRequest) -> HttpResponse:
     }
     context["error_message"] = error_message
     return render(request, "dashboard/index.html", context)
+
+
+def candles_api(request: HttpRequest) -> HttpResponse:
+    """현재 model_result 기반 OHLCV 캔들을 JSON으로 반환합니다.
+
+    프런트엔드에서 주기적으로 호출해 실시간 차트처럼 사용합니다.
+    """
+    try:
+        _, df, _ = _load_model_result()
+        limit_raw = request.GET.get("limit")
+        try:
+            limit = int(limit_raw) if limit_raw is not None else CHART_CANDLES
+        except ValueError:
+            limit = CHART_CANDLES
+        candles = _prepare_candles(df, limit=limit)
+        return JsonResponse({"candles": candles})
+    except Exception as exc:  # noqa: BLE001
+        return JsonResponse({"error": str(exc)}, status=500)
 
