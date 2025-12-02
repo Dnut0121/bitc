@@ -3,10 +3,17 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
+import torch
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
+from torch.utils.data import DataLoader
+
+from src.model import SequenceDataset, build_sequences, load_model_checkpoint
+from src.pressure import compute_pressure
+from scripts.prepare_dataset import read_daily_csv
 
 
 DEFAULT_PROB_THRESHOLD = 0.6
@@ -62,6 +69,126 @@ def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
     return snapshot, df, meta
 
 
+def _load_validate_predictions() -> tuple[dict, pd.DataFrame, dict, dict]:
+    """dataset/validate 최신 CSV에 대해 LSTM으로 prob_up을 예측해 붙인 DataFrame을 반환합니다."""
+    model_path = Path(settings.BITC_LSTM_CHECKPOINT)
+    validate_dir = Path(settings.BITC_VALIDATE_DIR)
+    if not model_path.exists():
+        raise FileNotFoundError(f"LSTM 체크포인트를 찾을 수 없습니다: {model_path}")
+
+    csv_path = _pick_latest_validate_csv(validate_dir)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # 1) CSV 로드 및 피처 생성
+    ohlcv = read_daily_csv(csv_path)
+    df = compute_pressure(ohlcv)
+
+    # 2) 모델/정규화 통계/룩백 로드
+    model, feature_mean, feature_std, lookback = load_model_checkpoint(model_path, device=device)
+
+    # 3) 시퀀스 구축 및 정규화
+    sequences, targets, indexes = build_sequences(df, lookback)
+    total_sequences = len(sequences)
+    if total_sequences < 5:
+        raise ValueError(f"평가에 필요한 시퀀스가 부족합니다. ({total_sequences})")
+
+    feature_mean = feature_mean.astype(np.float32)
+    feature_std = feature_std.astype(np.float32)
+    std_safe = np.where(feature_std < 1e-6, 1.0, feature_std)
+    normalized = (sequences - feature_mean) / std_safe
+
+    dataset = SequenceDataset(normalized, targets)
+    loader = DataLoader(dataset, batch_size=256)
+
+    # 4) 예측 및 정확도 계산
+    model.eval()
+    probs_list: list[np.ndarray] = []
+    preds_list: list[np.ndarray] = []
+    with torch.no_grad():
+        for seq_batch, target_batch in loader:
+            seq_batch = seq_batch.to(device)
+            logits = model(seq_batch)
+            probs = torch.sigmoid(logits).cpu().numpy()
+            preds = (probs >= 0.5).astype(np.int8)
+            probs_list.append(probs.astype(np.float32))
+            preds_list.append(preds.astype(np.int8))
+
+    probs_all = np.concatenate(probs_list) if probs_list else np.array([], dtype=np.float32)
+    preds_all = np.concatenate(preds_list) if preds_list else np.array([], dtype=np.int8)
+    accuracy = float((preds_all == targets[: len(preds_all)]).mean()) if len(preds_all) else float("nan")
+
+    # 5) prob_up/신호 붙이기
+    df_pred = df.copy()
+    df_pred["prob_up"] = np.nan
+    df_pred.loc[indexes, "prob_up"] = probs_all
+    df_pred["pred_direction"] = np.where(df_pred["prob_up"] >= 0.5, 1, -1)
+    df_pred["signal"] = np.where(df_pred["prob_up"] >= 0.55, 1, np.where(df_pred["prob_up"] <= 0.45, -1, 0))
+
+    # 6) 스냅샷/메타 정보
+    latest = df_pred.iloc[-1]
+    snapshot = {
+        "timestamp": df_pred.index[-1],
+        "price_open": float(latest.get("open", float("nan"))),
+        "price_close": float(latest.get("close", float("nan"))),
+        "price_high": float(latest.get("high", float("nan"))),
+        "price_low": float(latest.get("low", float("nan"))),
+        "buy_pressure": float(latest.get("buy_pressure", float("nan"))),
+        "sell_pressure": float(latest.get("sell_pressure", float("nan"))),
+        "buy_ratio": float(latest.get("buy_ratio", float("nan"))),
+        "imbalance": float(latest.get("imbalance", float("nan"))),
+        "prob_up": float(latest.get("prob_up", float("nan"))),
+        "pred_direction": int(latest.get("pred_direction", 0)),
+        "val_accuracy": accuracy,
+        "val_loss": float("nan"),
+        "lookback": lookback,
+        "tail_rows": len(df_pred),
+        "device": str(device),
+        "file": csv_path.name,
+    }
+
+    meta = {
+        "accuracy": accuracy,
+        "loss": float("nan"),
+        "file": csv_path.name,
+        "lookback": lookback,
+        "tail_rows": len(df_pred),
+        "device": str(device),
+    }
+
+    eval_dict = {
+        "accuracy": accuracy,
+        "accuracy_pct": accuracy * 100.0 if not np.isnan(accuracy) else None,
+        "total_sequences": total_sequences,
+        "file": csv_path.name,
+        "lookback": lookback,
+        "checkpoint": str(model_path),
+        "device": str(device),
+        "error": None,
+        "samples": [],
+    }
+    # 최근 200개 예측을 담아 템플릿에서 재사용
+    sample_limit = 200
+    n = min(sample_limit, len(probs_all))
+    if n > 0:
+        slice_indexes = indexes[-n:]
+        slice_targets = targets[-n:]
+        slice_preds = preds_all[-n:]
+        closes = df_pred.loc[slice_indexes, "close"]
+        samples: list[dict] = []
+        for ts, tgt, pred in zip(slice_indexes, slice_targets[-n:], slice_preds):
+            samples.append(
+                {
+                    "timestamp": ts.isoformat(),
+                    "close": float(closes.get(ts, float("nan"))),
+                    "actual_up": int(tgt),
+                    "pred_up": int(pred),
+                    "correct": bool(int(tgt) == int(pred)),
+                }
+            )
+        eval_dict["samples"] = samples
+    return snapshot, df_pred, meta, eval_dict
+
+
 def _prepare_candles(df: pd.DataFrame, limit: int = CHART_CANDLES) -> list[dict]:
     """차트용 OHLCV 캔들 시퀀스를 반환합니다."""
     required = {"open", "high", "low", "close", "volume"}
@@ -82,6 +209,114 @@ def _prepare_candles(df: pd.DataFrame, limit: int = CHART_CANDLES) -> list[dict]
             }
         )
     return candles
+
+
+def _pick_latest_validate_csv(validate_dir: Path) -> Path:
+    candidates = list(validate_dir.glob("*.csv"))
+    if not candidates:
+        raise FileNotFoundError(f"검증 CSV를 찾을 수 없습니다: {validate_dir}")
+    candidates.sort()
+    return candidates[-1]
+
+
+def _evaluate_lstm_on_validate() -> dict:
+    """btc_lstm.pt 모델을 dataset/validate 최신 CSV에 적용해 정확도를 계산합니다."""
+    result = {
+        "accuracy": None,
+        "accuracy_pct": None,
+        "total_sequences": 0,
+        "file": None,
+        "lookback": None,
+        "checkpoint": settings.BITC_LSTM_CHECKPOINT,
+        "device": None,
+        "error": None,
+        "samples": [],  # 최근 예측 결과 일부를 시각화용으로 담는다.
+    }
+    try:
+        model_path = Path(settings.BITC_LSTM_CHECKPOINT)
+        validate_dir = Path(settings.BITC_VALIDATE_DIR)
+        if not model_path.exists():
+            raise FileNotFoundError(f"LSTM 체크포인트를 찾을 수 없습니다: {model_path}")
+        csv_path = _pick_latest_validate_csv(validate_dir)
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        result["device"] = str(device)
+
+        # 1) 검증 CSV 로드 및 피처 생성
+        ohlcv = read_daily_csv(csv_path)
+        pressured = compute_pressure(ohlcv)
+
+        # 2) 체크포인트 로드
+        model, feature_mean, feature_std, lookback = load_model_checkpoint(model_path, device=device)
+        result["lookback"] = lookback
+        result["file"] = csv_path.name
+
+        # 3) 시퀀스/타깃 생성 및 정규화
+        sequences, targets, indexes = build_sequences(pressured, lookback)
+        total_sequences = len(sequences)
+        result["total_sequences"] = total_sequences
+        if total_sequences < 5:
+            raise ValueError(f"평가에 필요한 시퀀스가 부족합니다. ({total_sequences})")
+
+        feature_mean = feature_mean.astype(np.float32)
+        feature_std = feature_std.astype(np.float32)
+        std_safe = np.where(feature_std < 1e-6, 1.0, feature_std)
+        normalized = (sequences - feature_mean) / std_safe
+
+        dataset = SequenceDataset(normalized, targets)
+        loader = DataLoader(dataset, batch_size=256)
+
+        # 4) 정확도 계산
+        model.eval()
+        correct = 0
+        total = 0
+        preds_list: list[np.ndarray] = []
+        with torch.no_grad():
+            for seq_batch, target_batch in loader:
+                seq_batch = seq_batch.to(device)
+                target_batch = target_batch.to(device)
+                logits = model(seq_batch)
+                probs = torch.sigmoid(logits)
+                preds = (probs >= 0.5).float()
+                correct += (preds == target_batch).sum().item()
+                total += target_batch.size(0)
+                preds_list.append(preds.cpu().numpy().astype(np.int8))
+
+        if preds_list:
+            preds_all = np.concatenate(preds_list)
+        else:
+            preds_all = np.array([], dtype=np.int8)
+
+        accuracy = correct / total if total > 0 else 0.0
+        result["accuracy"] = accuracy
+        result["accuracy_pct"] = accuracy * 100.0
+
+        # 5) 최근 일부 예측을 시각화용으로 준비 (최대 200개)
+        sample_limit = 200
+        n = min(sample_limit, len(preds_all))
+        if n > 0:
+            # build_sequences가 반환한 indexes는 각 시퀀스의 기준 시점이다.
+            slice_indexes = indexes[-n:]
+            slice_targets = targets[-n:]
+            slice_preds = preds_all[-n:]
+            closes = pressured.loc[slice_indexes, "close"]
+            samples: list[dict] = []
+            for ts, tgt, pred in zip(slice_indexes, slice_targets[-n:], slice_preds):
+                close_val = float(closes.get(ts, float("nan")))
+                samples.append(
+                    {
+                        "timestamp": ts.isoformat(),
+                        "close": close_val,
+                        "actual_up": int(tgt),
+                        "pred_up": int(pred),
+                        "correct": bool(int(tgt) == int(pred)),
+                    }
+                )
+            result["samples"] = samples
+        return result
+    except Exception as exc:  # noqa: BLE001
+        result["error"] = str(exc)
+        return result
 
 
 def _compute_trade_analysis(
@@ -179,16 +414,17 @@ def _compute_trade_analysis(
 
 
 def _compute_recent_view(df: pd.DataFrame) -> tuple[dict, list[dict]]:
-    data = df.tail(RECENT_ROWS).copy()
+    data = df.copy()
     if data.empty:
         return {"window": RECENT_ROWS}, []
 
+    window = len(data)
     avg_prob_up = float(data["prob_up"].mean()) if "prob_up" in data.columns else float("nan")
     bullish_ratio = float((data["prob_up"] >= 0.55).sum()) / len(data) * 100.0 if "prob_up" in data.columns else 0.0
     signal_up_ratio = float((data.get("signal", 0) > 0).sum()) / len(data) * 100.0
 
     summary = {
-        "window": RECENT_ROWS,
+        "window": window,
         "avg_prob_up": avg_prob_up,
         "bullish_ratio": bullish_ratio,
         "signal_up_ratio": signal_up_ratio,
@@ -214,6 +450,7 @@ def index(request: HttpRequest) -> HttpResponse:
     trade: dict | None = None
     recent_summary: dict | None = None
     recent_rows: list[dict] | None = None
+    lstm_eval: dict | None = None
 
     def _get_float(name: str, default: float) -> float:
         raw = request.GET.get(name)
@@ -239,9 +476,10 @@ def index(request: HttpRequest) -> HttpResponse:
     min_expected_pct = _get_float("min_expected_pct", DEFAULT_MIN_EXPECTED_PCT)
     fee_rate = _get_float("fee_rate", DEFAULT_FEE_RATE)
     slippage_rate = _get_float("slippage_rate", DEFAULT_SLIPPAGE_RATE)
+    show_flow = request.GET.get("show_flow") == "1"
 
     try:
-        snapshot, df, meta = _load_model_result()
+        snapshot, df, meta, lstm_eval = _load_validate_predictions()
         trade = _compute_trade_analysis(
             df,
             prob_threshold=prob_threshold,
@@ -251,7 +489,8 @@ def index(request: HttpRequest) -> HttpResponse:
             slippage_rate=slippage_rate,
             min_expected_pct=min_expected_pct,
         )
-        recent_summary, recent_rows = _compute_recent_view(df)
+        if show_flow:
+            recent_summary, recent_rows = _compute_recent_view(df)
         context["candles"] = _prepare_candles(df)
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
@@ -260,6 +499,7 @@ def index(request: HttpRequest) -> HttpResponse:
     context["trade"] = trade
     context["recent_summary"] = recent_summary
     context["recent_rows"] = recent_rows
+    context["lstm_eval"] = lstm_eval
     context["config"] = {
         "prob_threshold": prob_threshold,
         "horizon": horizon,
@@ -268,6 +508,7 @@ def index(request: HttpRequest) -> HttpResponse:
         "fee_rate": fee_rate,
         "slippage_rate": slippage_rate,
     }
+    context["show_flow"] = show_flow
     context["error_message"] = error_message
     return render(request, "dashboard/index.html", context)
 
