@@ -404,7 +404,7 @@
         </div>
       {% endif %}
 
-      <div class="tabs">
+      <div class="tabs" data-active-tab="{{ active_tab }}">
         <button type="button" class="tab-btn active" data-tab="binance">Binance 실시간</button>
         <button type="button" class="tab-btn" data-tab="model">전략 / 모델 대시보드</button>
       </div>
@@ -452,6 +452,32 @@
       </div>
 
       <div id="tab-model" class="tab-content">
+      <form method="get" style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end">
+        <div class="field" style="min-width: 200px">
+          <label for="model_path">모델 (models/*.pt)</label>
+          <select id="model_path" name="model_path" style="padding: 6px 8px; border-radius: 8px; background: rgba(15,23,42,0.9); color: var(--text-main); border: 1px solid rgba(55,65,81,0.9);">
+            <option value="">-- 선택 --</option>
+            {% for m in model_files %}
+              <option value="{{ m }}" {% if selected_model|slice:"-{{m|length}}" == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="min-width: 240px">
+          <label for="validate_file">검증 CSV (dataset/validate)</label>
+          <select id="validate_file" name="validate_file" style="padding: 6px 8px; border-radius: 8px; background: rgba(15,23,42,0.9); color: var(--text-main); border: 1px solid rgba(55,65,81,0.9);">
+            <option value="">-- 선택 --</option>
+            {% for f in validate_files %}
+              <option value="{{ f }}" {% if selected_validate|slice:"-{{f|length}}" == f %}selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="min-width: 140px">
+          <label>&nbsp;</label>
+          <input type="hidden" name="tab" value="model" />
+          <button class="btn" type="submit">선택한 모델/데이터로 검증</button>
+        </div>
+      </form>
+
       {% if snapshot %}
         <main>
           <section>
@@ -787,12 +813,15 @@
                   전체 플로우는 데이터가 많아 로딩에 시간이 걸릴 수 있습니다. 보기 버튼을 눌러 필요한 경우에만 불러오세요.
                 </div>
                 <form method="get">
+                  <input type="hidden" name="model_path" value="{{ selected_model }}" />
+                  <input type="hidden" name="validate_file" value="{{ selected_validate }}" />
                   <input type="hidden" name="prob_threshold" value="{{ config.prob_threshold }}" />
                   <input type="hidden" name="horizon" value="{{ config.horizon }}" />
                   <input type="hidden" name="risk_reward" value="{{ config.risk_reward }}" />
                   <input type="hidden" name="min_expected_pct" value="{{ config.min_expected_pct }}" />
                   <input type="hidden" name="fee_rate" value="{{ config.fee_rate }}" />
                   <input type="hidden" name="slippage_rate" value="{{ config.slippage_rate }}" />
+                  <input type="hidden" name="tab" value="model" />
                   <input type="hidden" name="show_flow" value="1" />
                   <button class="btn" type="submit">전체 플로우 보기</button>
                 </form>
@@ -1083,6 +1112,7 @@
         function initTabs() {
           const tabs = document.querySelectorAll(".tab-btn");
           const contents = document.querySelectorAll(".tab-content");
+          const tabsContainer = document.querySelector(".tabs");
           tabs.forEach(function (tab) {
             tab.addEventListener("click", function () {
               const target = tab.getAttribute("data-tab");
@@ -1100,6 +1130,14 @@
               }
             });
           });
+
+          const activeTab = tabsContainer ? tabsContainer.getAttribute("data-active-tab") : null;
+          if (activeTab === "model") {
+            const modelTab = document.querySelector('.tab-btn[data-tab="model"]');
+            if (modelTab) {
+              modelTab.click();
+            }
+          }
         }
 
         initTimeframeButtons();

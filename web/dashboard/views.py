@@ -69,14 +69,13 @@ def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
     return snapshot, df, meta
 
 
-def _load_validate_predictions() -> tuple[dict, pd.DataFrame, dict, dict]:
-    """dataset/validate 최신 CSV에 대해 LSTM으로 prob_up을 예측해 붙인 DataFrame을 반환합니다."""
-    model_path = Path(settings.BITC_LSTM_CHECKPOINT)
-    validate_dir = Path(settings.BITC_VALIDATE_DIR)
+def _load_validate_predictions(model_path: Path, csv_path: Path) -> tuple[dict, pd.DataFrame, dict, dict]:
+    """지정한 모델/검증 CSV에 대해 LSTM으로 prob_up을 예측해 붙인 DataFrame을 반환합니다."""
     if not model_path.exists():
         raise FileNotFoundError(f"LSTM 체크포인트를 찾을 수 없습니다: {model_path}")
+    if not csv_path.exists():
+        raise FileNotFoundError(f"검증 CSV를 찾을 수 없습니다: {csv_path}")
 
-    csv_path = _pick_latest_validate_csv(validate_dir)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 1) CSV 로드 및 피처 생성
@@ -477,21 +476,44 @@ def index(request: HttpRequest) -> HttpResponse:
     fee_rate = _get_float("fee_rate", DEFAULT_FEE_RATE)
     slippage_rate = _get_float("slippage_rate", DEFAULT_SLIPPAGE_RATE)
     show_flow = request.GET.get("show_flow") == "1"
+    model_choice = request.GET.get("model_path")
+    validate_choice = request.GET.get("validate_file")
+
+    models_dir = Path(settings.BITC_MODELS_DIR)
+    validate_dir = Path(settings.BITC_VALIDATE_DIR)
+    model_files = sorted([p.name for p in models_dir.glob("*.pt")]) if models_dir.exists() else []
+    validate_files = sorted([p.name for p in validate_dir.glob("*.csv")]) if validate_dir.exists() else []
+
+    selected_model: Path | None = None
+    selected_validate: Path | None = None
+    if model_choice:
+        p = Path(model_choice)
+        selected_model = p if p.is_absolute() else (models_dir / p)
+    if validate_choice:
+        p = Path(validate_choice)
+        selected_validate = p if p.is_absolute() else (validate_dir / p)
+
+    active_tab = request.GET.get("tab")
+    if not active_tab:
+        active_tab = "model" if (selected_model and selected_validate) else "binance"
 
     try:
-        snapshot, df, meta, lstm_eval = _load_validate_predictions()
-        trade = _compute_trade_analysis(
-            df,
-            prob_threshold=prob_threshold,
-            horizon=horizon,
-            risk_reward=risk_reward,
-            fee_rate=fee_rate,
-            slippage_rate=slippage_rate,
-            min_expected_pct=min_expected_pct,
-        )
-        if show_flow:
-            recent_summary, recent_rows = _compute_recent_view(df)
-        context["candles"] = _prepare_candles(df)
+        if selected_model and selected_validate:
+            snapshot, df, meta, lstm_eval = _load_validate_predictions(selected_model, selected_validate)
+            trade = _compute_trade_analysis(
+                df,
+                prob_threshold=prob_threshold,
+                horizon=horizon,
+                risk_reward=risk_reward,
+                fee_rate=fee_rate,
+                slippage_rate=slippage_rate,
+                min_expected_pct=min_expected_pct,
+            )
+            if show_flow:
+                recent_summary, recent_rows = _compute_recent_view(df)
+            context["candles"] = _prepare_candles(df)
+        else:
+            lstm_eval = None
     except Exception as exc:  # noqa: BLE001
         error_message = str(exc)
 
@@ -500,6 +522,11 @@ def index(request: HttpRequest) -> HttpResponse:
     context["recent_summary"] = recent_summary
     context["recent_rows"] = recent_rows
     context["lstm_eval"] = lstm_eval
+    context["model_files"] = model_files
+    context["validate_files"] = validate_files
+    context["selected_model"] = str(selected_model) if selected_model else ""
+    context["selected_validate"] = str(selected_validate) if selected_validate else ""
+    context["active_tab"] = active_tab
     context["config"] = {
         "prob_threshold": prob_threshold,
         "horizon": horizon,

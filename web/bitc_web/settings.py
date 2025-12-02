@@ -64,6 +64,7 @@ BITC_MODEL_META_JSON = os.environ.get(
 
 # LSTM 체크포인트 및 검증 데이터 디렉터리
 BITC_LSTM_CHECKPOINT = os.environ.get("BITC_LSTM_CHECKPOINT", str((BASE_DIR.parent / "models" / "btc_lstm.pt").resolve()))
+BITC_MODELS_DIR = os.environ.get("BITC_MODELS_DIR", str((BASE_DIR.parent / "models").resolve()))
 BITC_VALIDATE_DIR = os.environ.get(
     "BITC_VALIDATE_DIR",
     str((BASE_DIR.parent / "dataset" / "validate").resolve()),
