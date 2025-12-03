@@ -6,7 +6,11 @@ import logging
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-import matplotlib.pyplot as plt
+try:
+    import matplotlib.pyplot as plt
+except Exception:  # pragma: no cover - optional dependency
+    plt = None  # type: ignore[assignment]
+
 import pandas as pd
 import torch
 
@@ -19,6 +23,7 @@ from .model import (
     load_model_checkpoint,
 )
 from .pressure import compute_pressure
+from .backtest import run_event_backtest
 
 try:
     import wandb  # type: ignore[import]
@@ -41,6 +46,8 @@ def prepare_dataframe(args: argparse.Namespace) -> pd.DataFrame:
 
 
 def plot_summary(result: ModelResult, window: int, limit: int = 300) -> None:
+    if plt is None:  # pragma: no cover - matplotlib optional
+        raise RuntimeError("matplotlib is not installed; cannot plot summary.")
     data = result.data.tail(limit)
     fig, axes = plt.subplots(3, 1, figsize=(10, 8), sharex=True)
     axes[0].plot(data.index, data["close"], label="Price")
@@ -255,6 +262,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="한 번 체결될 때 슬리피지 비율 (예: 0.0001 = 0.01%).",
     )
     parser.add_argument(
+        "--label-margin-rate",
+        type=float,
+        default=0.0,
+        help="학습용 라벨에서 수수료/슬리피지를 모두 제하고도 이만큼(비율) 이상 남을 때만 1로 간주합니다.",
+    )
+    parser.add_argument(
+        "--cost-aware-label",
+        action="store_true",
+        help="훈련 타깃을 단순 up/down이 아니라, 수수료/슬리피지 이후 롱이 유리한 구간(1) vs 그 외(0)로 설정합니다.",
+    )
+    parser.add_argument(
+        "--label-horizon",
+        type=int,
+        default=1,
+        help="라벨을 만들 때 볼 미래 horizon(초). 기본은 다음 1초.",
+    )
+    parser.add_argument(
         "--wandb",
         action="store_true",
         help="Weights & Biases에 학습 결과와 시계열 데이터를 로깅합니다.",
@@ -293,6 +317,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         "--save-model",
         type=Path,
         help="학습된 LSTM 체크포인트를 저장할 경로 (예: models/btc_lstm.pt).",
+    )
+    parser.add_argument(
+        "--run-backtest",
+        action="store_true",
+        help="학습이 끝난 뒤 LSTM prob_up 기반 이벤트 백테스트를 실행하고 요약 지표를 출력합니다.",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
     # configure logging for CLI
@@ -350,6 +379,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 "risk_reward": args.risk_reward,
                 "fee_rate": args.fee_rate,
                 "slippage_rate": args.slippage_rate,
+                "label_margin_rate": args.label_margin_rate,
+                "label_horizon": args.label_horizon,
             }
             wandb_run = wandb.init(
                 project=args.wandb_project or "bitc",
@@ -420,6 +451,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             pressured,
             args.window,
             max_sequences=args.max_sequences,
+            use_cost_labels=args.cost_aware_label,
+            fee_rate=args.fee_rate,
+            slippage_rate=args.slippage_rate,
+            margin_rate=args.label_margin_rate,
+            label_horizon=args.label_horizon,
         )
     except ValueError as exc:
         logger.error(
@@ -469,6 +505,30 @@ def main(argv: Sequence[str] | None = None) -> None:
     # 옵션이 주어진 경우 학습된 모델을 체크포인트로 저장
     if args.save_model is not None:
         save_model_checkpoint(result, args.window, args.save_model)
+
+    # 이벤트 기반 백테스트 (원하면 quiet 모드에서도 수행)
+    if args.run_backtest:
+        try:
+            bt = run_event_backtest(
+                result.data,
+                window=args.window,
+                prob_threshold_long=args.prob_threshold,
+                prob_threshold_short=1.0 - args.prob_threshold,
+                horizon=args.horizon,
+                fee_rate=args.fee_rate,
+                slippage_rate=args.slippage_rate,
+            )
+            print()
+            print("=== Event-based backtest summary (prob_up-driven) ===")
+            print(f"- Total return (price diff units): {bt.total_return:.4f}")
+            print(f"- Sharpe (per-second, scaled):     {bt.sharpe:.3f}")
+            print(f"- Max drawdown:                    {bt.max_drawdown:.4f}")
+            print(f"- Hit ratio:                       {bt.hit_ratio:.3f}")
+            print(f"- Avg R-multiple:                  {bt.avg_r_multiple:.3f}")
+            print(f"- Profit factor:                   {bt.profit_factor:.3f}")
+            print(f"- Num trades:                      {bt.num_trades}")
+        except Exception:
+            logger.exception("run_event_backtest 중 오류가 발생했습니다.")
 
     if not args.quiet:
         print_snapshot(result, args.window)

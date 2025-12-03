@@ -199,7 +199,7 @@ def _read_last_rows(path: Path, tail_rows: int) -> pd.DataFrame:
     return combined
 
 
-def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
+def load_ohlcv(path: Path, tail_rows: int | None = None, resample_rule: str | None = "1s") -> pd.DataFrame:
     kwargs: dict[str, Any] = {"low_memory": False}
     if tail_rows is not None:
         df = _read_last_rows(path, tail_rows)
@@ -218,7 +218,42 @@ def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
         # pass path as str to avoid potential engine/path issues
         df = pd.read_csv(str(path), **read_kwargs)
     logger = logging.getLogger(__name__)
-    df = _align_columns(df)
+    try:
+        df = _align_columns(df)
+    except ValueError as exc:
+        msg = str(exc)
+        # 원본 Binance 1초 봉(kline) CSV처럼 헤더가 없고
+        # 첫 번째 컬럼이 epoch time 인 경우를 위한 폴백.
+        if "Missing column for timestamp" in msg and tail_rows is None:
+            raw = pd.read_csv(str(path), header=None, low_memory=False)
+            # 표준 Binance kline 형식:
+            # open_time, open, high, low, close, volume,
+            # close_time, quote_asset_volume, number_of_trades,
+            # taker_buy_base_asset_volume, taker_buy_quote_asset_volume, ignore
+            if raw.shape[1] >= 12:
+                raw = raw.iloc[:, :12]
+                raw.columns = [
+                    "open_time",
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "volume",
+                    "close_time",
+                    "quote_asset_volume",
+                    "number_of_trades",
+                    "taker_buy_base_asset_volume",
+                    "taker_buy_quote_asset_volume",
+                    "ignore",
+                ]
+            elif raw.shape[1] >= 6:
+                raw = raw.iloc[:, :6]
+                raw.columns = ["open_time", "open", "high", "low", "close", "volume"]
+            else:
+                raise
+            df = _align_columns(raw)
+        else:
+            raise
     ts_unit = _detect_timestamp_unit(df["timestamp"])
     # parse timestamps according to detected unit (coerce invalid)
     # When _detect_timestamp_unit returns "auto" we must let pandas infer
@@ -255,9 +290,28 @@ def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
         )
         df = df.loc[mask]
     df = df.set_index("timestamp").sort_index()
-    return (
-        df[["open", "high", "low", "close", "volume"]]
-        .resample("1s")
-        .agg({"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"})
-        .dropna()
-    )
+    # OHLCV 및 추가 마이크로구조 컬럼을 1초 단위로 집계
+    agg_spec: dict[str, str] = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    # 원본 kline에서 제공하는 추가 컬럼이 있으면 함께 집계
+    if "number_of_trades" in df.columns:
+        agg_spec["number_of_trades"] = "sum"
+    if "taker_buy_base_asset_volume" in df.columns:
+        agg_spec["taker_buy_base_asset_volume"] = "sum"
+    if "taker_buy_quote_asset_volume" in df.columns:
+        agg_spec["taker_buy_quote_asset_volume"] = "sum"
+
+    if resample_rule:
+        resampled = df.resample(resample_rule).agg(agg_spec)
+        # 필수 OHLCV가 모두 있는 구간만 사용
+        resampled = resampled.dropna(subset=["open", "high", "low", "close", "volume"])
+        return resampled
+
+    # resample을 하지 않는 경우(예: 이미 1m klines), 필수 컬럼이 비어있는 행만 제거하고 반환
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    return df

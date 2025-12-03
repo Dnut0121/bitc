@@ -29,8 +29,24 @@ def build_sequences(
     df: pd.DataFrame,
     lookback: int,
     max_sequences: int | None = None,
+    use_cost_labels: bool = False,
+    fee_rate: float = 0.0,
+    slippage_rate: float = 0.0,
+    margin_rate: float = 0.0,
+    label_horizon: int = 1,
+    feature_columns: Sequence[str] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, pd.DatetimeIndex]:
-    features: Sequence[str] = ["buy_ratio", "volume", "range", "price_change", "imbalance"]
+    if label_horizon <= 0:
+        raise ValueError("label_horizon must be a positive integer.")
+    if feature_columns is None:
+        # order-flow 피처가 있으면 강화된 조합을 사용하고,
+        # 그렇지 않으면 기존 조합으로 폴백한다.
+        advanced_features = ["buy_ratio", "price_change", "range", "taker_imbalance", "log_trades", "volume_per_trade"]
+        if all(col in df.columns for col in advanced_features):
+            feature_columns = advanced_features
+        else:
+            feature_columns = ["buy_ratio", "volume", "range", "price_change", "imbalance"]
+    features: Sequence[str] = list(feature_columns)
 
     # 메모리 보호: 너무 긴 시계열이면 마지막 max_sequences 구간만 사용
     if max_sequences is None or max_sequences <= 0:
@@ -48,18 +64,39 @@ def build_sequences(
         df = df.iloc[-max_rows_for_sequences:]
 
     feature_array = df[features].to_numpy(dtype=np.float32, copy=True)
-    target_series = (df["close"].shift(-1) > df["close"]).astype(int)
-    feature_array = feature_array[:-1]
-    target_array = target_series.to_numpy()[:-1]
+    if use_cost_labels:
+        from .labels import make_cost_aware_labels
+
+        # label_horizon 기준으로, 수수료/슬리피지를 제하고도 롱이 유리한 구간을 1로,
+        # 그 외(중립/숏 유리)를 0으로 두고 이진 타깃으로 사용한다.
+        cost_labels = make_cost_aware_labels(
+            df["close"],
+            horizon=label_horizon,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            margin_rate=margin_rate,
+        )
+        target_series = (cost_labels == 1).astype(int)
+    else:
+        # label_horizon 초 뒤의 종가가 현재보다 높은지 여부를 타깃으로 사용
+        shifted = df["close"].shift(-label_horizon)
+        target_series = (shifted > df["close"]).astype(int)
+
+    # 마지막 label_horizon 구간은 타깃을 정의할 수 없으므로 잘라낸다.
+    usable_len = max(0, len(df) - label_horizon)
+    feature_array = feature_array[:usable_len]
+    target_array = target_series.to_numpy()[:usable_len]
     if feature_array.shape[0] < lookback + 1:
         raise ValueError("Not enough samples to construct the requested lookback sequences.")
 
     sequences: list[np.ndarray] = []
     targets: list[int] = []
     indexes: list[pd.Timestamp] = []
-    for start in range(feature_array.shape[0] - lookback + 1):
+    max_start = feature_array.shape[0] - lookback
+    for start in range(max_start + 1):
         end = start + lookback
         sequences.append(feature_array[start:end])
+        # 시퀀스의 마지막 시점(end-1)을 기준으로 label_horizon 뒤 타깃을 사용
         targets.append(target_array[end - 1])
         indexes.append(df.index[start + lookback - 1])
     return np.stack(sequences), np.array(targets), pd.DatetimeIndex(indexes)
@@ -162,6 +199,9 @@ def train_lstm(
         epoch_loss = 0.0
         n_batches = len(train_loader)
         batch_log_every = max(1, n_batches // 10)
+        print(
+            f"[lstm] Epoch {epoch + 1}/{epochs} start — train={train_total}, val={val_total}, batches={n_batches}"
+        )
         logger.info("Starting epoch %d/%d — train samples=%d, val samples=%d, batches=%d", epoch + 1, epochs, train_total, val_total, n_batches)
         for i, (seq_batch, target_batch) in enumerate(train_loader, start=1):
             optimizer.zero_grad()
@@ -204,6 +244,10 @@ def train_lstm(
             val_loss,
             val_accuracy,
         )
+        print(
+            f"[lstm] Epoch {epoch + 1}/{epochs} done — train_loss={epoch_loss:.4f} "
+            f"val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}"
+        )
 
         # best 모델 갱신 및 early stopping 상태 업데이트
         if val_loss < best_val_loss - 1e-4:
@@ -228,10 +272,17 @@ def train_lstm(
 
     model.eval()
     with torch.no_grad():
-        normalized_tensor = torch.from_numpy(normalized.astype(np.float32)).to(device)
-        all_logits = model(normalized_tensor)
-        # CUDA 텐서를 바로 numpy로 바꿀 수 없으므로 CPU로 옮긴 뒤 변환
-        all_probs = torch.sigmoid(all_logits).cpu().numpy()
+        # 메모리 폭주를 막기 위해 전체 시퀀스를 한 번에 GPU에 올리지 않고 배치로 추론한다.
+        infer_bs = 2048
+        logits_chunks: list[torch.Tensor] = []
+        total = normalized.shape[0]
+        for start in range(0, total, infer_bs):
+            end = min(start + infer_bs, total)
+            batch_np = normalized[start:end].astype(np.float32, copy=False)
+            batch = torch.from_numpy(batch_np).to(device)
+            logits_chunks.append(model(batch).detach().cpu())
+        all_logits = torch.cat(logits_chunks, dim=0)
+        all_probs = torch.sigmoid(all_logits).numpy()
         preds = (all_probs >= 0.5).astype(int)
 
     enriched = df.reindex(indexes).copy()

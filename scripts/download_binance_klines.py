@@ -12,8 +12,27 @@ from urllib.parse import urljoin
 
 import requests
 
-
+# Binance Vision daily kline archives (per-day ZIP). Supports minute intervals such as 1m/3m/5m.
 BASE_URL = "https://data.binance.vision/data/spot/daily/klines/{symbol}/{interval}/"
+VALID_INTERVALS = {
+    # minute-level intervals
+    "1m",
+    "3m",
+    "5m",
+    "15m",
+    "30m",
+    # higher intervals (still supported by the daily kline archives)
+    "1h",
+    "2h",
+    "4h",
+    "6h",
+    "8h",
+    "12h",
+    "1d",
+    "3d",
+    "1w",
+    "1M",
+}
 
 
 def daterange(start: date, end: date) -> Iterable[date]:
@@ -54,10 +73,25 @@ def extract_zip(zip_path: Path, target_dir: Path) -> None:
     print(f"extracted {zip_path.name} -> {target_dir}")
 
 
+def _valid_interval(value: str) -> str:
+    val = value.strip()
+    if val not in VALID_INTERVALS:
+        valid_list = ", ".join(sorted(VALID_INTERVALS))
+        raise argparse.ArgumentTypeError(f"interval must be one of: {valid_list}")
+    return val
+
+
 def main(argv: Sequence[str] | None = None) -> None:
-    parser = argparse.ArgumentParser(description="Download Binance daily klines zip files.")
-    parser.add_argument("--symbol", default="BTCUSDT", help="Symbol on Binance Vision.")
-    parser.add_argument("--interval", default="1s", help="Interval folder name (e.g., 1s, 1m).")
+    parser = argparse.ArgumentParser(
+        description="Download Binance daily kline ZIPs (per-day CSV) for a date range."
+    )
+    parser.add_argument("--symbol", default="BTCUSDT", help="Binance symbol.")
+    parser.add_argument(
+        "--interval",
+        default="1m",
+        type=_valid_interval,
+        help="Kline interval (Binance format, e.g., 1m,3m,5m,15m,1h).",
+    )
     parser.add_argument("--start", required=True, help="Start date YYYY-MM-DD.")
     parser.add_argument("--end", required=True, help="End date YYYY-MM-DD.")
     parser.add_argument(
@@ -68,8 +102,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     parser.add_argument(
         "--extract",
+        dest="extract",
         action="store_true",
-        help="Unzip each downloaded archive into a subdirectory of the same name.",
+        default=True,
+        help="Unzip each downloaded archive into a subdirectory of the same name (default: on).",
+    )
+    parser.add_argument(
+        "--no-extract",
+        dest="extract",
+        action="store_false",
+        help="Skip extraction (keep only ZIP files).",
+    )
+    parser.add_argument(
+        "--remove-zip",
+        action="store_true",
+        help="Delete ZIP files after successful extraction to save space.",
     )
     parser.add_argument(
         "--max-files",
@@ -95,6 +142,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             count += 1
             if args.extract:
                 extract_zip(zip_path, args.dest / zip_path.stem)
+                if args.remove_zip:
+                    try:
+                        zip_path.unlink()
+                    except FileNotFoundError:
+                        pass
 
 
 if __name__ == "__main__":
