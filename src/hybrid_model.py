@@ -113,8 +113,8 @@ def train_hybrid_ensemble(
     if missing:
         raise ValueError(f"train_hybrid_ensemble: DataFrame is missing feature columns: {missing}")
 
-    required_for_clean = set(feature_columns)
-    required_for_clean.add("close")
+    # dropna subset은 리스트/Index를 기대하므로 list로 정리한다.
+    required_for_clean = list({*feature_columns, "close"})
     df_clean = df.dropna(subset=required_for_clean)
     if len(df_clean) < lookback + label_horizon + 2:
         raise ValueError("Not enough rows after feature engineering to build sequences for the hybrid model.")
