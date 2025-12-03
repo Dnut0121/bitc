@@ -288,6 +288,100 @@
         font-size: 11px;
         color: var(--text-muted);
       }
+      .chart-container {
+        width: 100%;
+        height: 360px;
+      }
+      .chart-note {
+        margin-top: 6px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .tf-toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 12px;
+        color: var(--text-muted);
+      }
+      .tf-label {
+        opacity: 0.9;
+      }
+      .tf-btn {
+        border-radius: 999px;
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        background: rgba(15, 23, 42, 0.9);
+        color: var(--text-muted);
+        font-size: 11px;
+        padding: 3px 8px;
+        cursor: pointer;
+      }
+      .tf-btn.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+        border-color: rgba(247, 147, 26, 0.7);
+      }
+      .market-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        margin-top: 8px;
+      }
+      .market-table th,
+      .market-table td {
+        padding: 6px 8px;
+        border-bottom: 1px solid var(--border-subtle);
+      }
+      .market-table th {
+        text-align: left;
+        color: var(--text-muted);
+        font-weight: 500;
+        font-size: 11px;
+      }
+      .tabs {
+        display: flex;
+        gap: 8px;
+        margin: 12px 0 10px;
+      }
+      .tab-btn {
+        border-radius: 999px;
+        border: 1px solid rgba(55, 65, 81, 0.9);
+        background: rgba(15, 23, 42, 0.9);
+        color: var(--text-muted);
+        font-size: 11px;
+        padding: 4px 12px;
+        cursor: pointer;
+      }
+      .tab-btn.active {
+        background: var(--accent-soft);
+        color: var(--accent);
+        border-color: rgba(247, 147, 26, 0.7);
+      }
+      .tab-content {
+        display: none;
+      }
+      .tab-content.active {
+        display: block;
+      }
+      .eval-bars {
+        display: flex;
+        gap: 1px;
+        height: 60px;
+        margin-top: 8px;
+      }
+      .eval-bar {
+        flex: 1;
+        background: var(--border-subtle);
+      }
+      .eval-bar.up {
+        background: rgba(22, 199, 132, 0.9);
+      }
+      .eval-bar.down {
+        background: rgba(59, 130, 246, 0.9);
+      }
+      .eval-bar.wrong {
+        background: rgba(234, 57, 67, 0.9);
+      }
     </style>
   </head>
   <body>
@@ -310,10 +404,128 @@
         </div>
       {% endif %}
 
+      <div class="tabs" data-active-tab="{{ active_tab }}">
+        <button type="button" class="tab-btn active" data-tab="binance">Binance 실시간</button>
+        <button type="button" class="tab-btn" data-tab="model">전략 / 모델 대시보드</button>
+      </div>
+
+      <div id="tab-binance" class="tab-content active">
+        <section>
+          <div class="section-title">Market View · Binance BTCUSDT 실시간</div>
+          <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px">
+              <div class="tf-toggle">
+                <span class="tf-label">타임프레임:</span>
+                <button type="button" class="tf-btn active" data-tf="1s">1초</button>
+                <button type="button" class="tf-btn" data-tf="1m">1분</button>
+                <button type="button" class="tf-btn" data-tf="1h">1시간</button>
+              </div>
+              <div id="chart-status" style="font-size: 11px; color: var(--text-muted)"></div>
+            </div>
+            <div id="candles-chart" class="chart-container"></div>
+            <div class="chart-note">
+              <span>Binance 현물 시세 WebSocket 스트림을 통해 선택한 타임프레임(1초, 1분, 1시간)의 캔들과 거래량을 실시간으로 표시합니다.</span>
+            </div>
+            <div style="margin-top: 10px">
+              <table class="market-table">
+                <thead>
+                  <tr>
+                    <th>시간</th>
+                    <th>시가</th>
+                    <th>고가</th>
+                    <th>저가</th>
+                    <th>종가</th>
+                    <th>거래량</th>
+                  </tr>
+                </thead>
+                <tbody id="market-table-body">
+                  <tr>
+                    <td colspan="6" class="value-muted">
+                      실시간 캔들이 들어오면 최근 캔들이 여기 표로 정리되어 표시됩니다.
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-model" class="tab-content">
+      <form method="get" style="margin-bottom: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end">
+        <div class="field" style="min-width: 200px">
+          <label for="model_path">모델 (models/*.pt)</label>
+          <select id="model_path" name="model_path" style="padding: 6px 8px; border-radius: 8px; background: rgba(15,23,42,0.9); color: var(--text-main); border: 1px solid rgba(55,65,81,0.9);">
+            <option value="">-- 선택 --</option>
+            {% for m in model_files %}
+              <option value="{{ m }}" {% if selected_model|slice:"-{{m|length}}" == m %}selected{% endif %}>{{ m }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="min-width: 240px">
+          <label for="validate_file">검증 CSV (dataset/validate)</label>
+          <select id="validate_file" name="validate_file" style="padding: 6px 8px; border-radius: 8px; background: rgba(15,23,42,0.9); color: var(--text-main); border: 1px solid rgba(55,65,81,0.9);">
+            <option value="">-- 선택 --</option>
+            {% for f in validate_files %}
+              <option value="{{ f }}" {% if selected_validate|slice:"-{{f|length}}" == f %}selected{% endif %}>{{ f }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="field" style="min-width: 140px">
+          <label>&nbsp;</label>
+          <input type="hidden" name="tab" value="model" />
+          <button class="btn" type="submit">선택한 모델/데이터로 검증</button>
+        </div>
+      </form>
+
       {% if snapshot %}
         <main>
           <section>
-            <div class="section-title">Now · 현재 캔들 스냅샷</div>
+            <div class="section-title">LSTM 검증 결과 (dataset/validate 최신 파일)</div>
+            <div class="card">
+              {% if lstm_eval and not lstm_eval.error and lstm_eval.accuracy %}
+                <div class="card-header">
+                  <span class="label">btc_lstm.pt</span>
+                  <span class="chip">validate</span>
+                </div>
+                <div class="metric-main">
+                  {{ lstm_eval.accuracy_pct|floatformat:2 }}%
+                  <span class="metric-sub">accuracy</span>
+                </div>
+                <div class="meta">
+                  <span>파일: {{ lstm_eval.file }}</span>
+                  <span>시퀀스: {{ lstm_eval.total_sequences }}</span>
+                  <span>lookback: {{ lstm_eval.lookback }}</span>
+                  <span>checkpoint: {{ lstm_eval.checkpoint }}</span>
+                  <span>device: {{ lstm_eval.device }}</span>
+                </div>
+                {% if lstm_eval.samples %}
+                  <div class="eval-bars" title="최근 {{ lstm_eval.samples|length }}개 시퀀스의 예측 일치 여부">
+                    {% for s in lstm_eval.samples %}
+                      <div
+                        class="eval-bar {% if s.correct %}{% if s.pred_up %}up{% else %}down{% endif %}{% else %}wrong{% endif %}"
+                        title="{{ s.timestamp }} · 실제 {{ s.actual_up }} / 예측 {{ s.pred_up }} · close {{ s.close|floatformat:2 }}"
+                      ></div>
+                    {% endfor %}
+                  </div>
+                  <div class="meta" style="margin-top: 6px">
+                    <span>초록=상승 맞음 · 파랑=하락 맞음 · 빨강=틀림</span>
+                  </div>
+                {% endif %}
+              {% else %}
+                <div class="hint">
+                  {% if lstm_eval and lstm_eval.error %}
+                    LSTM 검증을 수행하지 못했습니다: {{ lstm_eval.error }}
+                  {% else %}
+                    LSTM 검증 결과를 불러올 수 없습니다. 체크포인트와 검증 CSV를 확인해 주세요.
+                  {% endif %}
+                </div>
+              {% endif %}
+            </div>
+          </section>
+
+          <section>
+            <div class="section-title">Last Candle · 마지막 캔들 스냅샷</div>
             <div class="grid">
               <div class="card card-soft">
                 <div class="card-header">
@@ -548,9 +760,9 @@
           </section>
 
           <section>
-            <div class="section-title">Recent Flow · 최근 {{ recent_summary.window }}초 시그널</div>
+            <div class="section-title">Flow · 전체 시그널{% if recent_summary %} ({{ recent_summary.window }}){% endif %}</div>
             <div class="card">
-              {% if recent_summary and recent_rows %}
+              {% if show_flow and recent_summary and recent_rows %}
                 <div class="meta" style="margin-bottom: 8px">
                   <span>평균 prob_up: {{ recent_summary.avg_prob_up|floatformat:3 }}</span>
                   <span>prob_up ≥ 0.55 비중: {{ recent_summary.bullish_ratio|floatformat:1 }}%</span>
@@ -598,8 +810,21 @@
                 </div>
               {% else %}
                 <div class="hint">
-                  최근 구간에 대한 시그널 요약 데이터를 찾을 수 없습니다. CSV 길이나 lookback 설정을 확인해 주세요.
+                  전체 플로우는 데이터가 많아 로딩에 시간이 걸릴 수 있습니다. 보기 버튼을 눌러 필요한 경우에만 불러오세요.
                 </div>
+                <form method="get">
+                  <input type="hidden" name="model_path" value="{{ selected_model }}" />
+                  <input type="hidden" name="validate_file" value="{{ selected_validate }}" />
+                  <input type="hidden" name="prob_threshold" value="{{ config.prob_threshold }}" />
+                  <input type="hidden" name="horizon" value="{{ config.horizon }}" />
+                  <input type="hidden" name="risk_reward" value="{{ config.risk_reward }}" />
+                  <input type="hidden" name="min_expected_pct" value="{{ config.min_expected_pct }}" />
+                  <input type="hidden" name="fee_rate" value="{{ config.fee_rate }}" />
+                  <input type="hidden" name="slippage_rate" value="{{ config.slippage_rate }}" />
+                  <input type="hidden" name="tab" value="model" />
+                  <input type="hidden" name="show_flow" value="1" />
+                  <button class="btn" type="submit">전체 플로우 보기</button>
+                </form>
               {% endif %}
             </div>
           </section>
@@ -607,6 +832,318 @@
       {% else %}
         <div class="error">표시할 스냅샷 데이터가 없습니다. CSV 경로와 데이터셋 준비 상태를 먼저 확인해 주세요.</div>
       {% endif %}
+      </div>
     </div>
+
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <script>
+      (function () {
+        if (typeof LightweightCharts === "undefined") {
+          return;
+        }
+        const container = document.getElementById("candles-chart");
+        const statusEl = document.getElementById("chart-status");
+        if (!container) {
+          return;
+        }
+
+        const chart = LightweightCharts.createChart(container, {
+          layout: {
+            background: { color: "#050711" },
+            textColor: "#9ca3af",
+          },
+          grid: {
+            vertLines: { color: "rgba(31,41,55,0.4)" },
+            horzLines: { color: "rgba(31,41,55,0.4)" },
+          },
+          timeScale: {
+            timeVisible: true,
+            secondsVisible: true,
+          },
+          rightPriceScale: {
+            borderColor: "rgba(55,65,81,0.8)",
+          },
+          crosshair: {
+            mode: LightweightCharts.CrosshairMode.Normal,
+          },
+        });
+
+        const candleSeries = chart.addCandlestickSeries({
+          upColor: "#16c784",
+          downColor: "#ea3943",
+          wickUpColor: "#16c784",
+          wickDownColor: "#ea3943",
+          borderUpColor: "#16c784",
+          borderDownColor: "#ea3943",
+        });
+
+        const volumeSeries = chart.addHistogramSeries({
+          priceFormat: { type: "volume" },
+          priceScaleId: "volume",
+          scaleMargins: {
+            top: 0.8,
+            bottom: 0,
+          },
+        });
+
+        function setStatus(msg) {
+          if (statusEl) {
+            statusEl.textContent = msg || "";
+          }
+        }
+
+        let ws = null;
+        const MAX_POINTS = 1000;
+        let liveBuffer = [];
+        let tickCount = 0;
+        let currentTf = "1s";
+
+        function stopBinanceMode() {
+          if (ws) {
+            ws.close();
+            ws = null;
+          }
+        }
+
+        function renderTable(buffer) {
+          const body = document.getElementById("market-table-body");
+          if (!body) return;
+          if (!buffer || buffer.length === 0) {
+            body.innerHTML =
+              '<tr><td colspan="6" class="value-muted">아직 수신된 캔들이 없습니다.</td></tr>';
+            return;
+          }
+
+          const rows = [];
+          const slice = buffer.slice(-20).reverse();
+          slice.forEach(function (c) {
+            const d = new Date(c.time * 1000);
+            const timeLabel = d.toLocaleTimeString();
+            rows.push(
+              "<tr>" +
+                '<td class="value-muted">' +
+                timeLabel +
+                "</td>" +
+                "<td>" +
+                c.open.toFixed(1) +
+                "</td>" +
+                "<td>" +
+                c.high.toFixed(1) +
+                "</td>" +
+                "<td>" +
+                c.low.toFixed(1) +
+                "</td>" +
+                "<td>" +
+                c.close.toFixed(1) +
+                "</td>" +
+                "<td>" +
+                c.volume.toFixed(3) +
+                "</td>" +
+                "</tr>",
+            );
+          });
+          body.innerHTML = rows.join("");
+        }
+
+        function startBinanceMode(tf) {
+          stopBinanceMode();
+          const tfLabel = tf || currentTf || "1s";
+          currentTf = tfLabel;
+          setStatus("소스: Binance 실시간 연결 중… (" + tfLabel + ")");
+          liveBuffer = [];
+          tickCount = 0;
+
+          const intervalMap = {
+            "1s": "kline_1s",
+            "1m": "kline_1m",
+            "1h": "kline_1h",
+          };
+          const interval = intervalMap[tfLabel] || intervalMap["1s"];
+
+          // 과거 히스토리 로드 (1분/1시간)
+          if (tfLabel !== "1s") {
+            (async function loadHistory() {
+              try {
+                const url =
+                  "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=" +
+                  tfLabel +
+                  "&limit=" +
+                  MAX_POINTS;
+                const res = await fetch(url);
+                if (!res.ok) {
+                  return;
+                }
+                const arr = await res.json();
+                if (!Array.isArray(arr)) {
+                  return;
+                }
+                liveBuffer = arr.map(function (k) {
+                  const openTime = k[0];
+                  const open = parseFloat(k[1]);
+                  const high = parseFloat(k[2]);
+                  const low = parseFloat(k[3]);
+                  const close = parseFloat(k[4]);
+                  const volume = parseFloat(k[5]);
+                  return {
+                    time: Math.floor(openTime / 1000),
+                    open,
+                    high,
+                    low,
+                    close,
+                    volume,
+                  };
+                });
+                if (liveBuffer.length > MAX_POINTS) {
+                  liveBuffer = liveBuffer.slice(liveBuffer.length - MAX_POINTS);
+                }
+                candleSeries.setData(liveBuffer);
+                const vols = liveBuffer.map(function (c) {
+                  const isUp = c.close >= c.open;
+                  return {
+                    time: c.time,
+                    value: c.volume,
+                    color: isUp ? "#16c784" : "#ea3943",
+                  };
+                });
+                volumeSeries.setData(vols);
+                renderTable(liveBuffer);
+                chart.timeScale().fitContent();
+              } catch (e) {
+                if (console && console.error) {
+                  console.error("history load failed", e);
+                }
+              }
+            })();
+          }
+
+          try {
+            ws = new WebSocket(
+              "wss://stream.binance.com:9443/ws/btcusdt@" + interval,
+            );
+          } catch (e) {
+            setStatus("Binance WebSocket 생성 실패");
+            return;
+          }
+
+          ws.onopen = function () {
+            setStatus("소스: Binance 실시간 (BTCUSDT " + tfLabel + ") · 연결됨");
+          };
+
+          ws.onclose = function () {
+            setStatus("Binance 연결 종료됨");
+          };
+
+          ws.onerror = function () {
+            setStatus("Binance WebSocket 에러");
+          };
+
+          ws.onmessage = function (event) {
+            try {
+              const msg = JSON.parse(event.data);
+              const k = msg.k;
+              if (!k) {
+                return;
+              }
+              const t = Math.floor(k.t / 1000);
+              const open = parseFloat(k.o);
+              const high = parseFloat(k.h);
+              const low = parseFloat(k.l);
+              const close = parseFloat(k.c);
+              const volume = parseFloat(k.v);
+
+              tickCount += 1;
+              setStatus(
+                "Binance 실시간 수신 중 (" +
+                  tfLabel +
+                  ") · 틱 " +
+                  tickCount +
+                  "개 · 현재가 " +
+                  close.toFixed(1),
+              );
+
+              const candle = { time: t, open, high, low, close, volume };
+
+              const last = liveBuffer[liveBuffer.length - 1];
+              if (last && last.time === t) {
+                liveBuffer[liveBuffer.length - 1] = candle;
+              } else {
+                liveBuffer.push(candle);
+              }
+              if (liveBuffer.length > MAX_POINTS) {
+                liveBuffer = liveBuffer.slice(liveBuffer.length - MAX_POINTS);
+              }
+
+              candleSeries.setData(liveBuffer);
+
+              const vols = liveBuffer.map(function (c) {
+                const isUp = c.close >= c.open;
+                return {
+                  time: c.time,
+                  value: c.volume,
+                  color: isUp ? "#16c784" : "#ea3943",
+                };
+              });
+              volumeSeries.setData(vols);
+
+              renderTable(liveBuffer);
+            } catch (e) {
+              if (console && console.error) {
+                console.error("Binance message parse error", e);
+              }
+            }
+          };
+        }
+
+        function initTimeframeButtons() {
+          const buttons = document.querySelectorAll(".tf-btn");
+          buttons.forEach(function (btn) {
+            btn.addEventListener("click", function () {
+              const tf = btn.getAttribute("data-tf");
+              if (!tf || tf === currentTf) return;
+              buttons.forEach(function (b) {
+                b.classList.remove("active");
+              });
+              btn.classList.add("active");
+              startBinanceMode(tf);
+            });
+          });
+        }
+
+        function initTabs() {
+          const tabs = document.querySelectorAll(".tab-btn");
+          const contents = document.querySelectorAll(".tab-content");
+          const tabsContainer = document.querySelector(".tabs");
+          tabs.forEach(function (tab) {
+            tab.addEventListener("click", function () {
+              const target = tab.getAttribute("data-tab");
+              if (!target) return;
+              tabs.forEach(function (t) {
+                t.classList.remove("active");
+              });
+              contents.forEach(function (c) {
+                c.classList.remove("active");
+              });
+              tab.classList.add("active");
+              const el = document.getElementById("tab-" + target);
+              if (el) {
+                el.classList.add("active");
+              }
+            });
+          });
+
+          const activeTab = tabsContainer ? tabsContainer.getAttribute("data-active-tab") : null;
+          if (activeTab === "model") {
+            const modelTab = document.querySelector('.tab-btn[data-tab="model"]');
+            if (modelTab) {
+              modelTab.click();
+            }
+          }
+        }
+
+        initTimeframeButtons();
+        initTabs();
+        startBinanceMode(currentTf);
+      })();
+    </script>
   </body>
 </html>
