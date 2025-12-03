@@ -199,6 +199,9 @@ def train_lstm(
         epoch_loss = 0.0
         n_batches = len(train_loader)
         batch_log_every = max(1, n_batches // 10)
+        print(
+            f"[lstm] Epoch {epoch + 1}/{epochs} start — train={train_total}, val={val_total}, batches={n_batches}"
+        )
         logger.info("Starting epoch %d/%d — train samples=%d, val samples=%d, batches=%d", epoch + 1, epochs, train_total, val_total, n_batches)
         for i, (seq_batch, target_batch) in enumerate(train_loader, start=1):
             optimizer.zero_grad()
@@ -241,6 +244,10 @@ def train_lstm(
             val_loss,
             val_accuracy,
         )
+        print(
+            f"[lstm] Epoch {epoch + 1}/{epochs} done — train_loss={epoch_loss:.4f} "
+            f"val_loss={val_loss:.4f} val_acc={val_accuracy:.4f}"
+        )
 
         # best 모델 갱신 및 early stopping 상태 업데이트
         if val_loss < best_val_loss - 1e-4:
@@ -265,10 +272,17 @@ def train_lstm(
 
     model.eval()
     with torch.no_grad():
-        normalized_tensor = torch.from_numpy(normalized.astype(np.float32)).to(device)
-        all_logits = model(normalized_tensor)
-        # CUDA 텐서를 바로 numpy로 바꿀 수 없으므로 CPU로 옮긴 뒤 변환
-        all_probs = torch.sigmoid(all_logits).cpu().numpy()
+        # 메모리 폭주를 막기 위해 전체 시퀀스를 한 번에 GPU에 올리지 않고 배치로 추론한다.
+        infer_bs = 2048
+        logits_chunks: list[torch.Tensor] = []
+        total = normalized.shape[0]
+        for start in range(0, total, infer_bs):
+            end = min(start + infer_bs, total)
+            batch_np = normalized[start:end].astype(np.float32, copy=False)
+            batch = torch.from_numpy(batch_np).to(device)
+            logits_chunks.append(model(batch).detach().cpu())
+        all_logits = torch.cat(logits_chunks, dim=0)
+        all_probs = torch.sigmoid(all_logits).numpy()
         preds = (all_probs >= 0.5).astype(int)
 
     enriched = df.reindex(indexes).copy()

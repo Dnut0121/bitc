@@ -63,3 +63,114 @@ def add_microstructure_features(df: pd.DataFrame) -> pd.DataFrame:
 
     return out
 
+
+def add_technical_features(
+    df: pd.DataFrame,
+    *,
+    volume_windows: Sequence[int] = (20, 60),
+    vwap_window: int = 60,
+    price_pct_windows: Sequence[int] = (1, 5, 15, 60),
+    roc_window: int = 30,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
+    rsi_window: int = 14,
+    bb_window: int = 20,
+    bb_k: float = 2.0,
+    lag_steps: Sequence[int] = (1, 5, 10),
+    rolling_windows: Sequence[int] = (20, 60),
+) -> pd.DataFrame:
+    """Add richer OHLCV-based technical features for hybrid models.
+
+    Included signals:
+      - Volume: ratio to rolling mean, VWAP deviation
+      - Momentum: price change %, ROC
+      - Indicators: MACD (fast/slow/signal), RSI, Bollinger bands
+      - Lags: close/volume/(buy_ratio/imbalance if present)
+      - Rolling stats: mean/std for close, volume, buy_ratio
+    """
+    required: Sequence[str] = ["open", "high", "low", "close", "volume"]
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(f"add_technical_features: missing required columns: {missing}")
+
+    out = df.copy()
+    close = out["close"].astype(float)
+    volume = out["volume"].astype(float)
+
+    # Volume ratios against rolling means
+    for window in volume_windows:
+        min_periods = max(5, window // 2)
+        roll_vol = volume.rolling(window, min_periods=min_periods).mean()
+        out[f"volume_ratio_{window}"] = volume / (roll_vol + 1e-9)
+
+    # VWAP over a rolling window
+    vwap_min_periods = max(5, vwap_window // 2)
+    vol_sum = volume.rolling(vwap_window, min_periods=vwap_min_periods).sum()
+    pv_sum = (close * volume).rolling(vwap_window, min_periods=vwap_min_periods).sum()
+    vwap = pv_sum / (vol_sum + 1e-9)
+    out[f"vwap_{vwap_window}"] = vwap
+    out[f"vwap_dev_{vwap_window}"] = close - vwap
+    out[f"vwap_pct_{vwap_window}"] = (close - vwap) / (vwap + 1e-9)
+
+    # Price change percentages and rate of change
+    for window in price_pct_windows:
+        out[f"price_change_pct_{window}"] = close.pct_change(window)
+    out[f"roc_{roc_window}"] = close.diff(roc_window) / (close.shift(roc_window) + 1e-9)
+
+    # MACD & signal/histogram
+    ema_fast = close.ewm(span=macd_fast, adjust=False, min_periods=macd_fast).mean()
+    ema_slow = close.ewm(span=macd_slow, adjust=False, min_periods=macd_slow).mean()
+    macd = ema_fast - ema_slow
+    signal = macd.ewm(span=macd_signal, adjust=False, min_periods=macd_signal).mean()
+    out["macd"] = macd
+    out["macd_signal"] = signal
+    out["macd_hist"] = macd - signal
+
+    # RSI
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    roll_gain = gain.ewm(alpha=1 / rsi_window, adjust=False, min_periods=rsi_window).mean()
+    roll_loss = loss.ewm(alpha=1 / rsi_window, adjust=False, min_periods=rsi_window).mean()
+    rs = roll_gain / (roll_loss + 1e-9)
+    out[f"rsi_{rsi_window}"] = 100 - (100 / (1 + rs))
+
+    # Bollinger Bands
+    min_bb = max(5, bb_window // 2)
+    rolling_close = close.rolling(bb_window, min_periods=min_bb)
+    mid = rolling_close.mean()
+    std = rolling_close.std()
+    upper = mid + bb_k * std
+    lower = mid - bb_k * std
+    out[f"bb_mid_{bb_window}"] = mid
+    out[f"bb_upper_{bb_window}"] = upper
+    out[f"bb_lower_{bb_window}"] = lower
+    out[f"bb_width_{bb_window}"] = (upper - lower) / (mid + 1e-9)
+    out[f"bb_percent_{bb_window}"] = (close - lower) / ((upper - lower) + 1e-9)
+
+    # Lag features
+    lag_targets: list[str] = ["close", "volume"]
+    if "buy_ratio" in out.columns:
+        lag_targets.append("buy_ratio")
+    if "imbalance" in out.columns:
+        lag_targets.append("imbalance")
+    for lag in lag_steps:
+        for col in lag_targets:
+            out[f"{col}_lag_{lag}"] = out[col].shift(lag)
+
+    # Rolling statistics
+    for window in rolling_windows:
+        min_periods = max(5, window // 2)
+        rc = close.rolling(window, min_periods=min_periods)
+        rv = volume.rolling(window, min_periods=min_periods)
+        out[f"roll_close_mean_{window}"] = rc.mean()
+        out[f"roll_close_std_{window}"] = rc.std()
+        out[f"roll_volume_mean_{window}"] = rv.mean()
+        out[f"roll_volume_std_{window}"] = rv.std()
+        if "buy_ratio" in out.columns:
+            rbr = out["buy_ratio"].rolling(window, min_periods=min_periods)
+            out[f"roll_buy_ratio_mean_{window}"] = rbr.mean()
+            out[f"roll_buy_ratio_std_{window}"] = rbr.std()
+
+    return out

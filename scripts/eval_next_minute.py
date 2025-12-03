@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
     # scripts 디렉토리 안에서 직접 실행하는 경우
     from prepare_dataset import read_daily_csv  # type: ignore[import]
 
+from src.labels import make_cost_aware_labels
 from src.model import SequenceDataset, load_model_checkpoint
 from src.pressure import compute_pressure
 
@@ -109,12 +110,79 @@ def build_horizon_sequences(
     return np.stack(sequences), np.array(target_list)
 
 
+def build_cost_aware_sequences(
+    df: "pd.DataFrame",
+    lookback: int,
+    horizon: int,
+    fee_rate: float,
+    slippage_rate: float,
+    margin_rate: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """수수료/슬리피지를 반영한 '롱 유리 구간(1) vs 그 외(0)' 라벨로 시퀀스를 생성합니다.
+
+    - src.labels.make_cost_aware_labels를 사용해 각 시점별로 {-1,0,1} 라벨을 만든 뒤
+      +1(롱 유리)인 구간을 1, 나머지(0, -1)를 0으로 두고 이진 분류 타깃으로 사용합니다.
+    - 마지막 horizon 구간(미래 가격이 없는 위치)은 자동으로 0으로 채워지며,
+      시퀀스 생성 시에도 horizon 뒤를 볼 수 있는 구간까지만 사용합니다.
+    """
+    import pandas as pd  # local import to avoid mandatory dependency for type checkers
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("df must be a pandas DataFrame.")
+
+    if horizon <= 0:
+        raise ValueError("horizon must be a positive integer (seconds).")
+
+    features: list[str] = ["buy_ratio", "volume", "range", "price_change", "imbalance"]
+    missing = [f for f in features if f not in df.columns]
+    if missing:
+        raise ValueError(f"Input DataFrame is missing required feature columns: {missing}")
+
+    total_rows = len(df)
+    if total_rows < lookback + horizon + 1:
+        raise ValueError(
+            f"Not enough rows ({total_rows}) for lookback={lookback} and horizon={horizon}."
+        )
+
+    # 수수료/슬리피지/마진을 반영한 3클래스 라벨을 만든 뒤,
+    # +1(롱 유리)인 위치만 1, 나머지를 0으로 두고 이진 타깃으로 사용한다.
+    cost_labels = make_cost_aware_labels(
+        df["close"],
+        horizon=horizon,
+        fee_rate=fee_rate,
+        slippage_rate=slippage_rate,
+        margin_rate=margin_rate,
+    )
+    label_array = (cost_labels.to_numpy() == 1).astype(np.float32)
+
+    # horizon 뒤의 가격을 볼 수 있는 위치까지만 사용
+    usable_len = total_rows - horizon
+    label_array = label_array[:usable_len]
+
+    feature_array = df[features].to_numpy(dtype=np.float32, copy=True)[:usable_len]
+
+    sequences: list[np.ndarray] = []
+    target_list: list[float] = []
+
+    max_start = usable_len - lookback
+    for start in range(max_start + 1):
+        end = start + lookback
+        sequences.append(feature_array[start:end])
+        target_list.append(label_array[end - 1])
+
+    return np.stack(sequences), np.array(target_list)
+
+
 def evaluate_next_minute(
     csv_path: Path,
     model_path: Path,
     batch_size: int,
     horizon: int,
     device: torch.device,
+    use_cost_labels: bool = False,
+    fee_rate: float = 0.0,
+    slippage_rate: float = 0.0,
+    margin_rate: float = 0.0,
 ) -> None:
     # 1) 하루치 1초 봉 CSV를 OHLCV DataFrame으로 로드
     ohlcv = read_daily_csv(csv_path)
@@ -127,8 +195,23 @@ def evaluate_next_minute(
     model, feature_mean, feature_std, lookback = load_model_checkpoint(model_path, device=device)
     print(f"[eval-1m] Loaded checkpoint from {model_path} (lookback={lookback})")
 
-    # 4) horizon(초) 뒤 방향을 타깃으로 하는 시퀀스 생성
-    sequences, targets = build_horizon_sequences(pressured, lookback=lookback, horizon=horizon)
+    # 4) horizon(초) 뒤 타깃을 만드는 방식에 따라 시퀀스 생성
+    if use_cost_labels:
+        print(
+            f"[eval-1m] Using cost-aware labels for +{horizon}s horizon "
+            f"(fee_rate={fee_rate}, slippage_rate={slippage_rate}, margin_rate={margin_rate})"
+        )
+        sequences, targets = build_cost_aware_sequences(
+            pressured,
+            lookback=lookback,
+            horizon=horizon,
+            fee_rate=fee_rate,
+            slippage_rate=slippage_rate,
+            margin_rate=margin_rate,
+        )
+    else:
+        sequences, targets = build_horizon_sequences(pressured, lookback=lookback, horizon=horizon)
+
     total_sequences = len(sequences)
     if total_sequences < 5:
         raise ValueError(f"Not enough sequences ({total_sequences}) to evaluate.")
@@ -198,6 +281,32 @@ def main(argv: Iterable[str] | None = None) -> None:
         default=60,
         help="Prediction horizon in seconds (default: 60s = 1 minute).",
     )
+    parser.add_argument(
+        "--cost-aware-label",
+        action="store_true",
+        help=(
+            "수수료/슬리피지를 반영한 라벨(롱 유리=1, 그 외=0)을 사용해 평가합니다. "
+            "기본값은 단순 방향(up/down) 라벨입니다."
+        ),
+    )
+    parser.add_argument(
+        "--fee-rate",
+        type=float,
+        default=0.0006,
+        help="한 번 체결될 때 수수료 비율 (예: 0.0005 = 0.05%).",
+    )
+    parser.add_argument(
+        "--slippage-rate",
+        type=float,
+        default=0.0003,
+        help="한 번 체결될 때 슬리피지 비율 (예: 0.0001 = 0.01%).",
+    )
+    parser.add_argument(
+        "--margin-rate",
+        type=float,
+        default=0.0,
+        help="수수료/슬리피지를 모두 제하고도 이만큼(비율) 이상 남을 때만 1로 라벨링합니다.",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.file is not None:
@@ -213,7 +322,17 @@ def main(argv: Iterable[str] | None = None) -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[eval-1m] Using device: {device}")
 
-    evaluate_next_minute(csv_path, args.model, args.batch_size, args.horizon, device)
+    evaluate_next_minute(
+        csv_path,
+        args.model,
+        args.batch_size,
+        args.horizon,
+        device,
+        use_cost_labels=args.cost_aware_label,
+        fee_rate=args.fee_rate,
+        slippage_rate=args.slippage_rate,
+        margin_rate=args.margin_rate,
+    )
 
 
 if __name__ == "__main__":

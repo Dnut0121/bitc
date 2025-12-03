@@ -199,7 +199,7 @@ def _read_last_rows(path: Path, tail_rows: int) -> pd.DataFrame:
     return combined
 
 
-def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
+def load_ohlcv(path: Path, tail_rows: int | None = None, resample_rule: str | None = "1s") -> pd.DataFrame:
     kwargs: dict[str, Any] = {"low_memory": False}
     if tail_rows is not None:
         df = _read_last_rows(path, tail_rows)
@@ -306,7 +306,12 @@ def load_ohlcv(path: Path, tail_rows: int | None = None) -> pd.DataFrame:
     if "taker_buy_quote_asset_volume" in df.columns:
         agg_spec["taker_buy_quote_asset_volume"] = "sum"
 
-    resampled = df.resample("1s").agg(agg_spec)
-    # 필수 OHLCV가 모두 있는 구간만 사용
-    resampled = resampled.dropna(subset=["open", "high", "low", "close", "volume"])
-    return resampled
+    if resample_rule:
+        resampled = df.resample(resample_rule).agg(agg_spec)
+        # 필수 OHLCV가 모두 있는 구간만 사용
+        resampled = resampled.dropna(subset=["open", "high", "low", "close", "volume"])
+        return resampled
+
+    # resample을 하지 않는 경우(예: 이미 1m klines), 필수 컬럼이 비어있는 행만 제거하고 반환
+    df = df.dropna(subset=["open", "high", "low", "close", "volume"])
+    return df
