@@ -382,6 +382,18 @@
       .eval-bar.wrong {
         background: rgba(234, 57, 67, 0.9);
       }
+      .live-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 999px;
+        background: #16c784;
+        display: inline-block;
+        box-shadow: 0 0 0 6px rgba(22, 199, 132, 0.18);
+      }
+      .live-dot.off {
+        background: #9ca3af;
+        box-shadow: 0 0 0 4px rgba(156, 163, 175, 0.2);
+      }
     </style>
   </head>
   <body>
@@ -407,6 +419,7 @@
       <div class="tabs" data-active-tab="{{ active_tab }}">
         <button type="button" class="tab-btn active" data-tab="binance">Binance 실시간</button>
         <button type="button" class="tab-btn" data-tab="model">전략 / 모델 대시보드</button>
+        <button type="button" class="tab-btn" data-tab="hybrid">하이브리드 1m 예측</button>
       </div>
 
       <div id="tab-binance" class="tab-content active">
@@ -443,6 +456,111 @@
                     <td colspan="6" class="value-muted">
                       실시간 캔들이 들어오면 최근 캔들이 여기 표로 정리되어 표시됩니다.
                     </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-hybrid" class="tab-content">
+        <section>
+          <div class="section-title">Hybrid Ensemble 1m · 다음 분봉 확률</div>
+          <div class="card">
+            <div class="card-header">
+              <span class="label">models/hybrid_ensemble_1m</span>
+              <span class="chip" id="hybrid-status"><span class="live-dot off" id="hybrid-live-dot"></span>&nbsp;대기 중</span>
+            </div>
+            <div class="grid">
+              <div class="card card-soft">
+                <div class="card-header">
+                  <span class="label">Ensemble prob_up</span>
+                  <span class="chip chip-neutral" id="hybrid-direction">예측 대기</span>
+                </div>
+                <div class="metric-main">
+                  <span id="hybrid-prob-ensemble">-</span>
+                  <span class="metric-sub">ensemble</span>
+                </div>
+                <div class="meta">
+                  <span>lookback: <span id="hybrid-lookback">-</span></span>
+                  <span>horizon(분): <span id="hybrid-horizon">-</span></span>
+                  <span>업데이트: <span id="hybrid-updated">-</span></span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">LSTM / XGBoost</span>
+                  <span class="chip">가중치</span>
+                </div>
+                <div class="metric-main">
+                  <span id="hybrid-prob-lstm">-</span>
+                  <span class="metric-sub">lstm</span>
+                </div>
+                <div class="meta">
+                  <span>xgb <span id="hybrid-prob-xgb">-</span></span>
+                  <span>wLSTM: <span id="hybrid-weight-lstm">-</span></span>
+                  <span>wXGB: <span id="hybrid-weight-xgb">-</span></span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">현재 캔들</span>
+                  <span class="chip chip-neutral" id="hybrid-next-time">-</span>
+                </div>
+                <div class="metric-main">
+                  <span id="hybrid-last-close">-</span>
+                  <span class="metric-sub">close</span>
+                </div>
+                <div class="meta">
+                  <span>O <span id="hybrid-last-open">-</span></span>
+                  <span>H <span id="hybrid-last-high">-</span></span>
+                  <span>L <span id="hybrid-last-low">-</span></span>
+                  <span>V <span id="hybrid-last-volume">-</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div style="margin-top: 12px">
+              <div id="hybrid-chart" class="chart-container"></div>
+              <div class="chart-note">
+                LSTM + XGBoost 앙상블이 실시간 Binance 1분 봉에 대해 다음 분(close 기준) 상승 확률을 계산합니다.
+                (라벨 horizon: <span id="hybrid-horizon-note">-</span>분)
+              </div>
+            </div>
+
+            <div style="margin-top: 12px">
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">prob_ensemble 추이 (최근)</span>
+                  <span class="chip">0.0 ~ 1.0</span>
+                </div>
+                <div id="hybrid-prob-chart" style="height: 180px"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="card" style="margin-top: 12px">
+            <div class="card-header">
+              <span class="label">최근 예측 스트림</span>
+              <span class="chip">ensemble / price</span>
+            </div>
+            <div style="max-height: 260px; overflow: auto">
+              <table class="table">
+                <thead>
+                  <tr>
+                    <th>시각</th>
+                    <th>prob_ensemble</th>
+                    <th>LSTM</th>
+                    <th>XGB</th>
+                    <th>close</th>
+                  </tr>
+                </thead>
+                <tbody id="hybrid-prob-table">
+                  <tr>
+                    <td colspan="5" class="value-muted">API 호출 후 실시간 예측이 여기에 채워집니다.</td>
                   </tr>
                 </tbody>
               </table>
@@ -1094,6 +1212,229 @@
           };
         }
 
+        // --- Hybrid ensemble (1m) ---
+        const hybridStatus = document.getElementById("hybrid-status");
+        const hybridLiveDot = document.getElementById("hybrid-live-dot");
+        const hybridTableBody = document.getElementById("hybrid-prob-table");
+        let hybridChart = null;
+        let hybridCandleSeries = null;
+        let hybridProbSeries = null;
+        let hybridProbOnlyChart = null;
+        let hybridProbOnlySeries = null;
+        let hybridTimer = null;
+        let hybridActive = false;
+
+        function ensureHybridChart() {
+          if (hybridChart) return;
+          const hybridContainer = document.getElementById("hybrid-chart");
+          if (!hybridContainer) return;
+          hybridChart = LightweightCharts.createChart(hybridContainer, {
+            layout: { background: { color: "#050711" }, textColor: "#9ca3af" },
+            grid: { vertLines: { color: "rgba(31,41,55,0.4)" }, horzLines: { color: "rgba(31,41,55,0.4)" } },
+            timeScale: { timeVisible: true, secondsVisible: false },
+            rightPriceScale: { borderColor: "rgba(55,65,81,0.8)" },
+          });
+          hybridCandleSeries = hybridChart.addCandlestickSeries({
+            upColor: "#16c784",
+            downColor: "#ea3943",
+            wickUpColor: "#16c784",
+            wickDownColor: "#ea3943",
+            borderUpColor: "#16c784",
+            borderDownColor: "#ea3943",
+          });
+          hybridProbSeries = hybridChart.addLineSeries({
+            color: "#f59e0b",
+            lineWidth: 2,
+            priceScaleId: "prob",
+          });
+          hybridChart.priceScale("prob").applyOptions({
+            autoScale: true,
+            scaleMargins: { top: 0.05, bottom: 0.65 },
+          });
+
+          const probOnlyContainer = document.getElementById("hybrid-prob-chart");
+          if (probOnlyContainer) {
+            hybridProbOnlyChart = LightweightCharts.createChart(probOnlyContainer, {
+              layout: { background: { color: "#050711" }, textColor: "#9ca3af" },
+              grid: { vertLines: { color: "rgba(31,41,55,0.25)" }, horzLines: { color: "rgba(31,41,55,0.25)" } },
+              timeScale: { timeVisible: true, secondsVisible: false },
+              rightPriceScale: { borderColor: "rgba(55,65,81,0.8)" },
+            });
+            hybridProbOnlySeries = hybridProbOnlyChart.addAreaSeries({
+              lineColor: "#f59e0b",
+              topColor: "rgba(245,158,11,0.35)",
+              bottomColor: "rgba(245,158,11,0.05)",
+              lineWidth: 2,
+            });
+            hybridProbOnlyChart.priceScale("right").applyOptions({
+              autoScale: true,
+              scaleMargins: { top: 0.05, bottom: 0.05 },
+            });
+            hybridProbOnlySeries.applyOptions({ priceFormat: { minMove: 0.0001, precision: 4 } });
+          }
+        }
+
+        function toUnix(ts) {
+          if (!ts) return null;
+          const d = ts instanceof Date ? ts : new Date(ts);
+          return Math.floor(d.getTime() / 1000);
+        }
+
+        function renderHybridTable(samples) {
+          if (!hybridTableBody) return;
+          if (!samples || samples.length === 0) {
+            hybridTableBody.innerHTML =
+              '<tr><td colspan="5" class="value-muted">예측 샘플을 불러오지 못했습니다.</td></tr>';
+            return;
+          }
+          const rows = [];
+          const recent = samples.slice(-30).reverse();
+          recent.forEach(function (s) {
+            const t = new Date(s.timestamp);
+            const timeLabel = t.toLocaleTimeString();
+            const ensemble = parseFloat(s.prob_ensemble || 0);
+            const lstm = parseFloat(s.prob_lstm || 0);
+            const xgb = parseFloat(s.prob_xgb || 0);
+            rows.push(
+              "<tr>" +
+                '<td class="value-muted">' +
+                timeLabel +
+                "</td>" +
+                "<td>" +
+                ensemble.toFixed(3) +
+                "</td>" +
+                "<td>" +
+                lstm.toFixed(3) +
+                "</td>" +
+                "<td>" +
+                xgb.toFixed(3) +
+                "</td>" +
+                "<td>" +
+                parseFloat(s.close || 0).toFixed(2) +
+                "</td>" +
+                "</tr>",
+            );
+          });
+          hybridTableBody.innerHTML = rows.join("");
+        }
+
+        function renderHybridChart(payload) {
+          ensureHybridChart();
+          if (!hybridChart || !hybridCandleSeries || !hybridProbSeries) return;
+          const candles = (payload.candles || []).map(function (c) {
+            return {
+              time: toUnix(c.timestamp),
+              open: c.open,
+              high: c.high,
+              low: c.low,
+              close: c.close,
+            };
+          });
+          if (candles.length > 0) {
+            hybridCandleSeries.setData(candles);
+          }
+          const probSamples = (payload.prob_samples || []).map(function (s) {
+            return { time: toUnix(s.timestamp), value: s.prob_ensemble };
+          });
+          if (probSamples.length > 0) {
+            hybridProbSeries.setData(probSamples);
+            if (hybridProbOnlySeries) {
+              hybridProbOnlySeries.setData(probSamples);
+              if (hybridProbOnlyChart) {
+                hybridProbOnlyChart.timeScale().fitContent();
+              }
+            }
+          }
+          if (candles.length > 0) {
+            hybridChart.timeScale().fitContent();
+          }
+        }
+
+        function setHybridMetrics(payload) {
+          const dirEl = document.getElementById("hybrid-direction");
+          if (dirEl) {
+            dirEl.classList.remove("chip-up", "chip-down", "chip-neutral");
+            if (payload.pred_direction > 0) {
+              dirEl.classList.add("chip-up");
+              dirEl.textContent = "상승 기대";
+            } else {
+              dirEl.classList.add("chip-down");
+              dirEl.textContent = "하락 기대";
+            }
+          }
+          const setText = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+          };
+          setText("hybrid-prob-ensemble", (payload.prob_ensemble || 0).toFixed(3));
+          setText("hybrid-prob-lstm", (payload.prob_lstm || 0).toFixed(3));
+          setText("hybrid-prob-xgb", (payload.prob_xgb || 0).toFixed(3));
+          setText("hybrid-weight-lstm", (payload.weights?.lstm || 0).toFixed(2));
+          setText("hybrid-weight-xgb", (payload.weights?.xgb || 0).toFixed(2));
+          setText("hybrid-lookback", payload.lookback);
+          setText("hybrid-horizon", payload.label_horizon);
+          setText("hybrid-horizon-note", payload.label_horizon);
+          setText("hybrid-updated", payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : "-");
+          setText("hybrid-next-time", payload.next_target_time ? "목표: " + new Date(payload.next_target_time).toLocaleTimeString() : "-");
+          if (payload.latest) {
+            setText("hybrid-last-close", parseFloat(payload.latest.close || 0).toFixed(2));
+            setText("hybrid-last-open", parseFloat(payload.latest.open || 0).toFixed(2));
+            setText("hybrid-last-high", parseFloat(payload.latest.high || 0).toFixed(2));
+            setText("hybrid-last-low", parseFloat(payload.latest.low || 0).toFixed(2));
+            setText("hybrid-last-volume", parseFloat(payload.latest.volume || 0).toFixed(3));
+          }
+          if (hybridStatus) {
+            const latency = payload.latency_ms != null ? ` · latency ${payload.latency_ms}ms` : "";
+            const server = payload.server_time ? ` · 서버 ${new Date(payload.server_time).toLocaleTimeString()}` : "";
+            hybridStatus.textContent =
+              "실시간 " + payload.symbol + " · 최신 " + (payload.candles?.length || 0) + "분" + latency + server;
+          }
+        }
+
+        async function fetchHybridPrediction() {
+          if (!hybridActive) return;
+          if (hybridStatus) {
+            hybridStatus.textContent = "실시간 예측 요청 중…";
+          }
+          if (hybridLiveDot) {
+            hybridLiveDot.classList.add("off");
+          }
+          try {
+            const res = await fetch("/api/hybrid-live/");
+            const data = await res.json();
+            if (!res.ok || data.error) {
+              throw new Error(data.error || "hybrid API error");
+            }
+            setHybridMetrics(data);
+            renderHybridChart(data);
+            renderHybridTable(data.prob_samples || []);
+            if (hybridLiveDot) {
+              hybridLiveDot.classList.remove("off");
+            }
+          } catch (err) {
+            if (hybridStatus) {
+              hybridStatus.textContent = "에러: " + err.message;
+            }
+          }
+        }
+
+        function startHybridPolling() {
+          hybridActive = true;
+          fetchHybridPrediction();
+          if (hybridTimer) {
+            clearInterval(hybridTimer);
+          }
+          hybridTimer = setInterval(fetchHybridPrediction, 3000);
+        }
+
+        function stopHybridPolling() {
+          hybridActive = false;
+          if (hybridTimer) {
+            clearInterval(hybridTimer);
+            hybridTimer = null;
+          }
+        }
+
         function initTimeframeButtons() {
           const buttons = document.querySelectorAll(".tf-btn");
           buttons.forEach(function (btn) {
@@ -1128,14 +1469,19 @@
               if (el) {
                 el.classList.add("active");
               }
+              if (target === "hybrid") {
+                startHybridPolling();
+              } else {
+                stopHybridPolling();
+              }
             });
           });
 
           const activeTab = tabsContainer ? tabsContainer.getAttribute("data-active-tab") : null;
-          if (activeTab === "model") {
-            const modelTab = document.querySelector('.tab-btn[data-tab="model"]');
-            if (modelTab) {
-              modelTab.click();
+          if (activeTab === "model" || activeTab === "hybrid") {
+            const selected = document.querySelector('.tab-btn[data-tab="' + activeTab + '"]');
+            if (selected) {
+              selected.click();
             }
           }
         }
@@ -1143,6 +1489,9 @@
         initTimeframeButtons();
         initTabs();
         startBinanceMode(currentTf);
+        if (document.querySelector('.tab-btn[data-tab="hybrid"]')?.classList.contains("active")) {
+          startHybridPolling();
+        }
       })();
     </script>
   </body>

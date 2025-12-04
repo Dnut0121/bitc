@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from pathlib import Path
+import time
 
 import numpy as np
 import pandas as pd
+import requests
 import torch
+import xgboost as xgb
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.shortcuts import render
 from torch.utils.data import DataLoader
 
+from src.features import add_microstructure_features, add_technical_features
+from src.hybrid_model import load_hybrid_checkpoint
 from src.model import SequenceDataset, build_sequences, load_model_checkpoint
 from src.pressure import compute_pressure
 from scripts.prepare_dataset import read_daily_csv
@@ -24,6 +31,8 @@ DEFAULT_FEE_RATE = 0.0006
 DEFAULT_SLIPPAGE_RATE = 0.0003
 RECENT_ROWS = 30
 CHART_CANDLES = 300
+HYBRID_CACHE: dict = {}
+HYBRID_WORKERS: dict[str, "HybridStreamWorker"] = {}
 
 
 def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
@@ -442,6 +451,251 @@ def _compute_recent_view(df: pd.DataFrame) -> tuple[dict, list[dict]]:
     return summary, rows
 
 
+def _get_hybrid_artifacts() -> dict:
+    """Load and cache the hybrid ensemble checkpoint (LSTM + XGBoost + meta)."""
+    checkpoint = Path(getattr(settings, "BITC_HYBRID_CHECKPOINT", "models/hybrid_ensemble_1m")).resolve()
+    cache = HYBRID_CACHE
+    if cache.get("path") == checkpoint and cache.get("model") is not None:
+        return cache
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    lstm_result, booster, meta = load_hybrid_checkpoint(checkpoint, device=device)
+    model = lstm_result.model
+    if model is None:
+        raise RuntimeError("Hybrid checkpoint에 LSTM 가중치가 없습니다.")
+    model.eval()
+
+    feature_columns = list(meta["feature_columns"])
+    feature_mean = np.asarray(meta["feature_mean"], dtype=np.float32)
+    feature_std = np.asarray(meta["feature_std"], dtype=np.float32)
+    std_safe = np.where(feature_std < 1e-6, 1.0, feature_std)
+    lookback = int(meta.get("lookback", len(feature_columns)))
+    label_horizon = int(meta.get("label_horizon", 1))
+    weights = meta.get("ensemble_weights", [0.5, 0.5])
+    w_lstm = float(weights[0]) if len(weights) >= 1 else 0.5
+    w_xgb = float(weights[1]) if len(weights) >= 2 else 0.5
+    weight_sum = w_lstm + w_xgb if (w_lstm + w_xgb) > 0 else 1.0
+    cache = {
+        "path": checkpoint,
+        "model": model.to(device),
+        "booster": booster,
+        "feature_columns": feature_columns,
+        "feature_mean": feature_mean,
+        "feature_std": feature_std,
+        "feature_std_safe": std_safe,
+        "lookback": lookback,
+        "label_horizon": label_horizon,
+        "weights": (w_lstm / weight_sum, w_xgb / weight_sum),
+        "device": device,
+    }
+    HYBRID_CACHE.update(cache)
+    return cache
+
+
+def _fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 500) -> pd.DataFrame:
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol.upper(), "interval": interval, "limit": max(10, min(limit, 1000))}
+    res = requests.get(url, params=params, timeout=6)
+    res.raise_for_status()
+    raw = res.json()
+    cols = [
+        "open_time",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "close_time",
+        "quote_asset_volume",
+        "number_of_trades",
+        "taker_buy_base_asset_volume",
+        "taker_buy_quote_asset_volume",
+        "ignore",
+    ]
+    df = pd.DataFrame(raw, columns=cols)
+    df["timestamp"] = pd.to_datetime(df["open_time"], unit="ms", utc=True)
+    numeric_cols = [
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "number_of_trades",
+        "taker_buy_base_asset_volume",
+        "taker_buy_quote_asset_volume",
+    ]
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.set_index("timestamp")
+    return df
+
+
+def _run_hybrid_live_prediction(symbol: str = "BTCUSDT") -> dict:
+    """Fetch recent 1m candles, build features, and run hybrid ensemble inference."""
+    t0 = time.time()
+    artifacts = _get_hybrid_artifacts()
+    lookback = int(artifacts["lookback"])
+    label_horizon = int(artifacts["label_horizon"])
+    feature_columns: list[str] = artifacts["feature_columns"]
+    feature_mean: np.ndarray = artifacts["feature_mean"]
+    std_safe: np.ndarray = artifacts["feature_std_safe"]
+    w_lstm, w_xgb = artifacts["weights"]
+    device: torch.device = artifacts["device"]
+
+    # 충분한 히스토리를 확보 (룩백+피처 윈도우 여유분)
+    limit = max(lookback + label_horizon + 120, 300)
+    ohlcv = _fetch_binance_klines(symbol, interval="1m", limit=limit)
+    pressured = compute_pressure(ohlcv)
+    featured = add_technical_features(add_microstructure_features(pressured))
+    df_clean = featured.dropna(subset=[*feature_columns, "close"])
+    if df_clean.empty or len(df_clean) < lookback + 2:
+        raise RuntimeError("피처 계산 후 사용 가능한 캔들이 충분하지 않습니다. (룩백 부족)")
+
+    sequences, targets, indexes = build_sequences(
+        df_clean,
+        lookback=lookback,
+        label_horizon=label_horizon,
+        feature_columns=feature_columns,
+    )
+    norm_sequences = (sequences - feature_mean) / std_safe
+    model: torch.nn.Module = artifacts["model"]
+    model = model.to(device)
+    with torch.no_grad():
+        logits = model(torch.from_numpy(norm_sequences.astype(np.float32)).to(device))
+        probs_lstm_all = torch.sigmoid(logits).cpu().numpy().astype(np.float32)
+
+    feature_matrix = df_clean.reindex(indexes)[feature_columns].to_numpy(dtype=np.float32)
+    feature_matrix = (feature_matrix - feature_mean) / std_safe
+    dmatrix = xgb.DMatrix(feature_matrix)
+    booster = artifacts["booster"]
+    best_it = getattr(booster, "best_iteration", None)
+    iter_range = None
+    if best_it is not None:
+        iter_range = (0, int(best_it) + 1)
+    prob_xgb_all = booster.predict(dmatrix, iteration_range=iter_range) if iter_range else booster.predict(dmatrix)
+    probs_ensemble = w_lstm * probs_lstm_all + w_xgb * prob_xgb_all
+
+    latest_idx = -1
+    latest_time = indexes[latest_idx]
+    next_time = latest_time + pd.Timedelta(minutes=label_horizon)
+    latest_row = df_clean.loc[latest_time]
+    latest_close = float(latest_row.get("close", float("nan")))
+    latest_open = float(latest_row.get("open", float("nan")))
+    latest_high = float(latest_row.get("high", float("nan")))
+    latest_low = float(latest_row.get("low", float("nan")))
+
+    sample_limit = 60
+    tail_indexes = indexes[-sample_limit:]
+    closes_aligned = df_clean.reindex(tail_indexes)["close"]
+    samples: list[dict] = []
+    for ts, pe, pl, px in zip(
+        tail_indexes,
+        probs_ensemble[-sample_limit:],
+        probs_lstm_all[-sample_limit:],
+        prob_xgb_all[-sample_limit:],
+    ):
+        samples.append(
+            {
+                "timestamp": ts.isoformat(),
+                "prob_ensemble": float(pe),
+                "prob_lstm": float(pl),
+                "prob_xgb": float(px),
+                "close": float(closes_aligned.get(ts, float("nan"))),
+            }
+        )
+
+    return {
+        "symbol": symbol.upper(),
+        "lookback": lookback,
+        "label_horizon": label_horizon,
+        "weights": {"lstm": w_lstm, "xgb": w_xgb},
+        "timestamp": latest_time.isoformat(),
+        "next_target_time": next_time.isoformat(),
+        "prob_ensemble": float(probs_ensemble[latest_idx]),
+        "prob_lstm": float(probs_lstm_all[latest_idx]),
+        "prob_xgb": float(prob_xgb_all[latest_idx]),
+        "pred_direction": 1 if probs_ensemble[latest_idx] >= 0.5 else -1,
+        "latest": {
+            "open": latest_open,
+            "high": latest_high,
+            "low": latest_low,
+            "close": latest_close,
+            "volume": float(latest_row.get("volume", float("nan"))),
+        },
+        "candles": _prepare_candles(ohlcv.tail(240)),
+        "prob_samples": samples,
+        "server_time": pd.Timestamp.utcnow().isoformat(),
+        "latency_ms": int((time.time() - t0) * 1000),
+    }
+
+
+class HybridStreamWorker:
+    """Background worker that refreshes hybrid predictions and broadcasts to listeners."""
+
+    def __init__(self, symbol: str = "BTCUSDT", interval_ms: int = 2000) -> None:
+        self.symbol = symbol.upper()
+        self.interval = max(0.5, interval_ms / 1000.0)
+        self.listeners: set[queue.SimpleQueue] = set()
+        self.lock = threading.Lock()
+        self.thread: threading.Thread | None = None
+        self.running = False
+        self.last_payload: dict | None = None
+
+    def start(self) -> None:
+        with self.lock:
+            if self.running:
+                return
+            self.running = True
+            self.thread = threading.Thread(target=self._run, daemon=True, name="hybrid-stream-worker")
+            self.thread.start()
+
+    def stop(self) -> None:
+        with self.lock:
+            self.running = False
+
+    def _broadcast(self, payload: dict) -> None:
+        with self.lock:
+            targets = list(self.listeners)
+        for q in targets:
+            q.put(payload)
+
+    def _run(self) -> None:
+        while True:
+            with self.lock:
+                if not self.running:
+                    break
+            try:
+                payload = _run_hybrid_live_prediction(symbol=self.symbol)
+                self.last_payload = payload
+                self._broadcast(payload)
+            except Exception as exc:  # noqa: BLE001
+                self._broadcast({"error": str(exc), "symbol": self.symbol})
+            time.sleep(self.interval)
+
+    def register(self) -> queue.SimpleQueue:
+        q: queue.SimpleQueue = queue.SimpleQueue()
+        with self.lock:
+            self.listeners.add(q)
+            payload = self.last_payload
+        if payload is not None:
+            q.put(payload)
+        return q
+
+    def unregister(self, q: queue.SimpleQueue) -> None:
+        with self.lock:
+            self.listeners.discard(q)
+
+
+def _get_hybrid_worker(symbol: str, interval_ms: int = 2000) -> HybridStreamWorker:
+    key = f"{symbol.upper()}::{interval_ms}"
+    worker = HYBRID_WORKERS.get(key)
+    if worker is None:
+        worker = HybridStreamWorker(symbol=symbol, interval_ms=interval_ms)
+        HYBRID_WORKERS[key] = worker
+    worker.start()
+    return worker
+
+
 def index(request: HttpRequest) -> HttpResponse:
     context: dict = {}
     error_message: str | None = None
@@ -495,7 +749,7 @@ def index(request: HttpRequest) -> HttpResponse:
 
     active_tab = request.GET.get("tab")
     if not active_tab:
-        active_tab = "model" if (selected_model and selected_validate) else "binance"
+        active_tab = "model" if (selected_model and selected_validate) else "hybrid"
 
     try:
         if selected_model and selected_validate:
@@ -556,4 +810,38 @@ def candles_api(request: HttpRequest) -> HttpResponse:
         return JsonResponse({"candles": candles})
     except Exception as exc:  # noqa: BLE001
         return JsonResponse({"error": str(exc)}, status=500)
+
+
+def hybrid_live_api(request: HttpRequest) -> HttpResponse:
+    """Hybrid ensemble로 Binance 1분 봉 기반 다음 분 예측을 반환합니다."""
+    symbol = request.GET.get("symbol", "BTCUSDT")
+    try:
+        worker = _get_hybrid_worker(symbol, interval_ms=2000)
+        if worker.last_payload is not None:
+            return JsonResponse(worker.last_payload)
+        result = _run_hybrid_live_prediction(symbol=symbol)
+        worker.last_payload = result
+        return JsonResponse(result)
+    except Exception as exc:  # noqa: BLE001
+        return JsonResponse({"error": str(exc)}, status=500)
+
+
+def hybrid_live_stream(request: HttpRequest) -> HttpResponse:
+    """Server-Sent Events로 하이브리드 예측을 지속 스트리밍."""
+    symbol = request.GET.get("symbol", "BTCUSDT")
+    interval_ms = max(500, min(5000, int(request.GET.get("interval_ms", "1000") or "1000")))
+    worker = _get_hybrid_worker(symbol, interval_ms=interval_ms)
+
+    def event_stream():
+        q = worker.register()
+        try:
+            while True:
+                payload = q.get()
+                yield f"data: {json.dumps(payload, default=str)}\n\n"
+        finally:
+            worker.unregister(q)
+
+    response = StreamingHttpResponse(event_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    return response
 
