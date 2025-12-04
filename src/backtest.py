@@ -58,6 +58,8 @@ def run_event_backtest(
     horizon: int,
     fee_rate: float,
     slippage_rate: float,
+    *,
+    record_trades: bool = False,
 ) -> BacktestResult:
     """LSTM의 prob_up 시그널을 사용한 매우 단순한 이벤트 기반 백테스트.
 
@@ -101,6 +103,7 @@ def run_event_backtest(
     pnl_per_step = np.zeros(len(df), dtype=float)
     trade_pnls: list[float] = []
     trade_rs: list[float] = []
+    trade_records: list[TradeRecord] = []
     wins = 0
     losses = 0
     max_daily_loss = -3.0
@@ -186,6 +189,23 @@ def run_event_backtest(
                 trade_pnls.append(net)
                 r_multiple = net / (abs(stop_price - entry_price) + 1e-9)
                 trade_rs.append(r_multiple)
+                if record_trades:
+                    trade_records.append(
+                        TradeRecord(
+                            entry_time=index[entry_idx],
+                            exit_time=ts,
+                            direction="long" if is_long else "short",
+                            entry_price=entry_price,
+                            exit_price=price,
+                            tp_price=target_price,
+                            sl_price=stop_price,
+                            horizon=horizon,
+                            holding_period=holding,
+                            exit_reason=exit_reason,
+                            net_pnl=net,
+                            r_multiple=r_multiple,
+                        )
+                    )
 
                 if net > 0:
                     wins += 1
@@ -229,8 +249,8 @@ def run_event_backtest(
         avg_r_multiple=avg_r,
         profit_factor=float(profit_factor),
         num_trades=int(num_trades),
-        trades=None,
-    )  # trades not recorded for this simple backtest
+        trades=trade_records if record_trades else None,
+    )
 
 
 def run_quantile_long_short_backtest(
