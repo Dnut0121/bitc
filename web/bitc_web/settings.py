@@ -69,4 +69,7 @@ BITC_VALIDATE_DIR = os.environ.get(
     "BITC_VALIDATE_DIR",
     str((BASE_DIR.parent / "dataset" / "validate").resolve()),
 )
+BITC_HYBRID_CHECKPOINT = os.environ.get(
+    "BITC_HYBRID_CHECKPOINT", str((BASE_DIR.parent / "models" / "hybrid_ensemble_1m").resolve())
+)
 
