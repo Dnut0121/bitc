@@ -12,7 +12,7 @@ import requests
 import torch
 import xgboost as xgb
 from django.conf import settings
-from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.http import HttpRequest, HttpResponse, JsonResponse, StreamingHttpResponse
 from django.shortcuts import render
 from torch.utils.data import DataLoader
 
@@ -33,6 +33,8 @@ RECENT_ROWS = 30
 CHART_CANDLES = 300
 HYBRID_CACHE: dict = {}
 HYBRID_WORKERS: dict[str, "HybridStreamWorker"] = {}
+HYBRID_LIVE_CACHE: dict[str, dict] = {}
+HYBRID_LIVE_CACHE_TTL = 1.5
 
 
 def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
@@ -629,6 +631,18 @@ def _run_hybrid_live_prediction(symbol: str = "BTCUSDT") -> dict:
     }
 
 
+def _get_cached_hybrid_live(symbol: str = "BTCUSDT") -> dict:
+    """Return cached hybrid live payload within TTL, otherwise compute fresh."""
+    key = symbol.upper()
+    now = time.time()
+    cached = HYBRID_LIVE_CACHE.get(key)
+    if cached and (now - cached.get("ts", 0) < HYBRID_LIVE_CACHE_TTL):
+        return cached["payload"]
+    payload = _run_hybrid_live_prediction(symbol=key)
+    HYBRID_LIVE_CACHE[key] = {"ts": now, "payload": payload}
+    return payload
+
+
 class HybridStreamWorker:
     """Background worker that refreshes hybrid predictions and broadcasts to listeners."""
 
@@ -652,6 +666,7 @@ class HybridStreamWorker:
     def stop(self) -> None:
         with self.lock:
             self.running = False
+        # thread는 데몬으로 동작하므로 별도 join 없이 종료된다.
 
     def _broadcast(self, payload: dict) -> None:
         with self.lock:
@@ -667,12 +682,14 @@ class HybridStreamWorker:
             try:
                 payload = _run_hybrid_live_prediction(symbol=self.symbol)
                 self.last_payload = payload
+                HYBRID_LIVE_CACHE[self.symbol] = {"ts": time.time(), "payload": payload}
                 self._broadcast(payload)
             except Exception as exc:  # noqa: BLE001
                 self._broadcast({"error": str(exc), "symbol": self.symbol})
             time.sleep(self.interval)
 
     def register(self) -> queue.SimpleQueue:
+        self.start()
         q: queue.SimpleQueue = queue.SimpleQueue()
         with self.lock:
             self.listeners.add(q)
@@ -684,6 +701,9 @@ class HybridStreamWorker:
     def unregister(self, q: queue.SimpleQueue) -> None:
         with self.lock:
             self.listeners.discard(q)
+            should_stop = self.running and not self.listeners
+        if should_stop:
+            self.stop()
 
 
 def _get_hybrid_worker(symbol: str, interval_ms: int = 2000) -> HybridStreamWorker:
@@ -692,7 +712,6 @@ def _get_hybrid_worker(symbol: str, interval_ms: int = 2000) -> HybridStreamWork
     if worker is None:
         worker = HybridStreamWorker(symbol=symbol, interval_ms=interval_ms)
         HYBRID_WORKERS[key] = worker
-    worker.start()
     return worker
 
 
@@ -747,9 +766,12 @@ def index(request: HttpRequest) -> HttpResponse:
         p = Path(validate_choice)
         selected_validate = p if p.is_absolute() else (validate_dir / p)
 
-    active_tab = request.GET.get("tab")
-    if not active_tab:
-        active_tab = "model" if (selected_model and selected_validate) else "hybrid"
+    allowed_tabs = {"binance", "model", "hybrid", "paper"}
+    requested_tab = request.GET.get("tab")
+    if requested_tab in allowed_tabs:
+        active_tab = requested_tab
+    else:
+        active_tab = "model" if (selected_model and selected_validate) else "binance"
 
     try:
         if selected_model and selected_validate:
@@ -816,11 +838,7 @@ def hybrid_live_api(request: HttpRequest) -> HttpResponse:
     """Hybrid ensemble로 Binance 1분 봉 기반 다음 분 예측을 반환합니다."""
     symbol = request.GET.get("symbol", "BTCUSDT")
     try:
-        worker = _get_hybrid_worker(symbol, interval_ms=2000)
-        if worker.last_payload is not None:
-            return JsonResponse(worker.last_payload)
-        result = _run_hybrid_live_prediction(symbol=symbol)
-        worker.last_payload = result
+        result = _get_cached_hybrid_live(symbol=symbol)
         return JsonResponse(result)
     except Exception as exc:  # noqa: BLE001
         return JsonResponse({"error": str(exc)}, status=500)

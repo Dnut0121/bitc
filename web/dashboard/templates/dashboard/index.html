@@ -418,8 +418,9 @@
 
       <div class="tabs" data-active-tab="{{ active_tab }}">
         <button type="button" class="tab-btn active" data-tab="binance">Binance 실시간</button>
-        <button type="button" class="tab-btn" data-tab="model">전략 / 모델 대시보드</button>
         <button type="button" class="tab-btn" data-tab="hybrid">하이브리드 1m 예측</button>
+        <button type="button" class="tab-btn" data-tab="paper">하이브리드 모의투자</button>
+        <button type="button" class="tab-btn" data-tab="model">전략 / 모델 대시보드</button>
       </div>
 
       <div id="tab-binance" class="tab-content active">
@@ -564,6 +565,143 @@
                   </tr>
                 </tbody>
               </table>
+            </div>
+          </div>
+        </section>
+      </div>
+
+      <div id="tab-paper" class="tab-content">
+        <section>
+          <div class="section-title">Hybrid Model · 실시간 모의 투자</div>
+          <div class="card">
+            <div class="card-header">
+              <span class="label">prob_ensemble 기반 paper trading</span>
+              <span class="chip" id="paper-status"><span class="live-dot off" id="paper-live-dot"></span>&nbsp;대기 중</span>
+            </div>
+
+            <div class="grid">
+              <div class="card card-soft">
+                <div class="card-header">
+                  <span class="label">계좌 요약</span>
+                  <span class="chip chip-neutral" id="paper-last-action">대기 중</span>
+                </div>
+                <div class="metric-main">
+                  <span id="paper-equity">-</span>
+                  <span class="metric-sub">equity</span>
+                </div>
+                <div class="meta">
+                  <span>현금: <span id="paper-cash">-</span></span>
+                  <span>PnL: <span id="paper-pnl">-</span></span>
+                  <span>거래 수: <span id="paper-trade-count">0</span></span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">포지션 상태</span>
+                  <span class="chip chip-neutral" id="paper-position-state">미보유</span>
+                </div>
+                <div class="metric-main">
+                  <span id="paper-position-size">-</span>
+                  <span class="metric-sub">qty @ price</span>
+                </div>
+                <div class="meta">
+                  <span>진입가: <span id="paper-entry-price">-</span></span>
+                  <span>현재가: <span id="paper-current-price">-</span></span>
+                  <span>미실현: <span id="paper-unrealized">-</span></span>
+                </div>
+              </div>
+
+              <div class="card">
+                <div class="card-header">
+                  <span class="label">실시간 시그널</span>
+                  <span class="chip" id="paper-prob-chip">prob</span>
+                </div>
+                <div class="metric-main">
+                  <span id="paper-prob">-</span>
+                  <span class="metric-sub">prob_ensemble</span>
+                </div>
+                <div class="meta">
+                  <span>horizon: <span id="paper-horizon">-</span>분</span>
+                  <span>업데이트: <span id="paper-updated">-</span></span>
+                  <span>가격: <span id="paper-price">-</span></span>
+                </div>
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 12px">
+              <div class="card-header">
+                <span class="label">전략 설정</span>
+                <span class="chip">탭 활성 시에만 동작</span>
+              </div>
+              <form id="paper-config" class="form-row" onsubmit="return false;">
+                <div class="field">
+                  <label for="paper-initial-balance">초기 자본 (USDT)</label>
+                  <input id="paper-initial-balance" type="number" step="100" min="100" />
+                </div>
+                <div class="field">
+                  <label for="paper-order-pct">주문 비율 (%)</label>
+                  <input id="paper-order-pct" type="number" step="1" min="1" max="100" />
+                </div>
+                <div class="field">
+                  <label for="paper-entry-threshold">매수 조건 (prob ≥)</label>
+                  <input id="paper-entry-threshold" type="number" step="0.01" min="0" max="1" />
+                </div>
+                <div class="field">
+                  <label for="paper-short-entry">숏 진입 (prob ≤)</label>
+                  <input id="paper-short-entry" type="number" step="0.01" min="0" max="1" />
+                </div>
+                <div class="field">
+                  <label for="paper-exit-threshold">청산 조건 (prob ≤)</label>
+                  <input id="paper-exit-threshold" type="number" step="0.01" min="0" max="1" />
+                </div>
+                <div class="field">
+                  <label for="paper-short-exit">숏 청산 (prob ≥)</label>
+                  <input id="paper-short-exit" type="number" step="0.01" min="0" max="1" />
+                </div>
+                <div class="field">
+                  <label for="paper-tp">익절 한계 (%)</label>
+                  <input id="paper-tp" type="number" step="0.1" min="0" />
+                </div>
+                <div class="field">
+                  <label for="paper-sl">손절 한계 (%)</label>
+                  <input id="paper-sl" type="number" step="0.1" min="-50" />
+                </div>
+                <button class="btn" type="button" id="paper-reset-btn">자본/상태 초기화</button>
+              </form>
+              <div class="hint">
+                prob_ensemble·가격이 3초마다 업데이트될 때마다 조건에 맞으면 가상 포지션을 열고 닫습니다.
+                탭을 닫으면 시뮬레이션도 자동으로 멈춥니다.
+              </div>
+            </div>
+
+            <div class="card" style="margin-top: 12px">
+              <div class="card-header">
+                <span class="label">모의 체결 내역</span>
+                <span class="chip">최근 20건</span>
+              </div>
+              <div style="max-height: 240px; overflow: auto">
+                <table class="table">
+                  <thead>
+                    <tr>
+                      <th>포지션</th>
+                      <th>진입</th>
+                      <th>청산</th>
+                      <th>진입가</th>
+                      <th>청산가</th>
+                      <th>PnL</th>
+                      <th>prob</th>
+                    </tr>
+                  </thead>
+                  <tbody id="paper-trades-body">
+                    <tr>
+                      <td colspan="7" class="value-muted">
+                        탭을 열면 실시간 예측으로 체결 시나리오가 표시됩니다.
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </section>
@@ -1015,12 +1153,14 @@
         let liveBuffer = [];
         let tickCount = 0;
         let currentTf = "1s";
+        let activeTab = null;
 
         function stopBinanceMode() {
           if (ws) {
             ws.close();
             ws = null;
           }
+          setStatus("Binance 탭 비활성 / 연결 안 됨");
         }
 
         function renderTable(buffer) {
@@ -1064,6 +1204,10 @@
         }
 
         function startBinanceMode(tf) {
+          if (activeTab !== "binance") {
+            stopBinanceMode();
+            return;
+          }
           stopBinanceMode();
           const tfLabel = tf || currentTf || "1s";
           currentTf = tfLabel;
@@ -1391,8 +1535,17 @@
           }
         }
 
+        async function fetchHybridData() {
+          const res = await fetch("/api/hybrid-live/");
+          const data = await res.json();
+          if (!res.ok || data.error) {
+            throw new Error(data.error || "hybrid API error");
+          }
+          return data;
+        }
+
         async function fetchHybridPrediction() {
-          if (!hybridActive) return;
+          if (!hybridActive || activeTab !== "hybrid") return;
           if (hybridStatus) {
             hybridStatus.textContent = "실시간 예측 요청 중…";
           }
@@ -1400,11 +1553,7 @@
             hybridLiveDot.classList.add("off");
           }
           try {
-            const res = await fetch("/api/hybrid-live/");
-            const data = await res.json();
-            if (!res.ok || data.error) {
-              throw new Error(data.error || "hybrid API error");
-            }
+            const data = await fetchHybridData();
             setHybridMetrics(data);
             renderHybridChart(data);
             renderHybridTable(data.prob_samples || []);
@@ -1419,7 +1568,11 @@
         }
 
         function startHybridPolling() {
+          if (activeTab !== "hybrid") return;
           hybridActive = true;
+          if (hybridStatus) {
+            hybridStatus.textContent = "실시간 예측 대기 중…";
+          }
           fetchHybridPrediction();
           if (hybridTimer) {
             clearInterval(hybridTimer);
@@ -1433,6 +1586,354 @@
             clearInterval(hybridTimer);
             hybridTimer = null;
           }
+          if (hybridStatus) {
+            hybridStatus.textContent = "탭 비활성 · 예측 중지";
+          }
+          if (hybridLiveDot) {
+            hybridLiveDot.classList.add("off");
+          }
+        }
+
+        // --- Hybrid paper trading ---
+        const paperStatus = document.getElementById("paper-status");
+        const paperLiveDot = document.getElementById("paper-live-dot");
+        const paperTradesBody = document.getElementById("paper-trades-body");
+        const paperConfig = {
+          initialBalance: 10000,
+          orderPct: 20,
+          entryThreshold: 0.62,
+          exitThreshold: 0.48,
+          shortEntryThreshold: 0.38,
+          shortExitThreshold: 0.52,
+          takeProfitPct: 0.8,
+          stopLossPct: -0.5,
+        };
+        const paperState = {
+          cash: paperConfig.initialBalance,
+          equity: paperConfig.initialBalance,
+          realizedPnl: 0,
+          position: null,
+          trades: [],
+          lastAction: "대기 중",
+        };
+        let paperTimer = null;
+        let paperActive = false;
+
+        function applyPaperConfigFromInputs() {
+          const map = [
+            ["paper-initial-balance", "initialBalance"],
+            ["paper-order-pct", "orderPct"],
+            ["paper-entry-threshold", "entryThreshold"],
+            ["paper-short-entry", "shortEntryThreshold"],
+            ["paper-exit-threshold", "exitThreshold"],
+            ["paper-short-exit", "shortExitThreshold"],
+            ["paper-tp", "takeProfitPct"],
+            ["paper-sl", "stopLossPct"],
+          ];
+          map.forEach(function ([id, key]) {
+            const el = document.getElementById(id);
+            if (!el) return;
+            if (el.value === "" || el.value === null) {
+              el.value = paperConfig[key];
+              return;
+            }
+            const val = parseFloat(el.value);
+            if (!Number.isNaN(val)) {
+              paperConfig[key] = val;
+            } else {
+              el.value = paperConfig[key];
+            }
+          });
+          paperConfig.initialBalance = Math.max(100, paperConfig.initialBalance);
+          paperConfig.orderPct = Math.min(100, Math.max(1, paperConfig.orderPct));
+          paperConfig.entryThreshold = Math.min(1, Math.max(0, paperConfig.entryThreshold));
+          paperConfig.exitThreshold = Math.min(1, Math.max(0, paperConfig.exitThreshold));
+          paperConfig.shortEntryThreshold = Math.min(1, Math.max(0, paperConfig.shortEntryThreshold));
+          paperConfig.shortExitThreshold = Math.min(1, Math.max(0, paperConfig.shortExitThreshold));
+          paperConfig.takeProfitPct = Math.max(0, paperConfig.takeProfitPct);
+          paperConfig.stopLossPct = Math.min(-0.01, paperConfig.stopLossPct);
+        }
+
+        function resetPaperState(clearTrades) {
+          paperState.cash = paperConfig.initialBalance;
+          paperState.equity = paperConfig.initialBalance;
+          paperState.realizedPnl = 0;
+          paperState.position = null;
+          if (clearTrades) {
+            paperState.trades = [];
+          }
+          paperState.lastAction = "대기 중";
+          renderPaperState();
+          renderPaperTrades();
+        }
+
+        function renderPaperTrades() {
+          if (!paperTradesBody) return;
+          if (!paperState.trades.length) {
+            paperTradesBody.innerHTML =
+              '<tr><td colspan="7" class="value-muted">모의 체결이 없습니다.</td></tr>';
+            return;
+          }
+          const rows = [];
+          const recent = paperState.trades.slice(-20).reverse();
+          recent.forEach(function (t) {
+            const pnlClass = t.pnl >= 0 ? "value-up" : "value-down";
+            rows.push(
+              "<tr>" +
+                "<td>" +
+                (t.side === "short" ? "숏" : "롱") +
+                "</td>" +
+                '<td class="value-muted">' +
+                t.entryTime +
+                "</td>" +
+                '<td class="value-muted">' +
+                t.exitTime +
+                "</td>" +
+                "<td>" +
+                t.entry.toFixed(2) +
+                "</td>" +
+                "<td>" +
+                t.exit.toFixed(2) +
+                "</td>" +
+                '<td class="' +
+                pnlClass +
+                '">' +
+                t.pnl.toFixed(4) +
+                " (" +
+                t.pnlPct.toFixed(2) +
+                "%)" +
+                "</td>" +
+                "<td>" +
+                t.entryProb.toFixed(3) +
+                "→" +
+                t.exitProb.toFixed(3) +
+                "</td>" +
+                "</tr>",
+            );
+          });
+          paperTradesBody.innerHTML = rows.join("");
+        }
+
+        function renderPaperState(payload) {
+          const price = payload?.latest ? parseFloat(payload.latest.close || 0) : null;
+          const probVal = payload ? parseFloat(payload.prob_ensemble || 0) : null;
+          const pos = paperState.position;
+          const positionValue = pos && price ? pos.qty * price : 0;
+          const unrealized = pos ? positionValue - pos.entryPrice * pos.qty : 0;
+          const unrealizedPct = pos ? ((price - pos.entryPrice) / pos.entryPrice) * 100 : 0;
+          paperState.equity = paperState.cash + positionValue;
+          const totalPnl = paperState.realizedPnl + unrealized;
+
+          const setText = (id, text) => {
+            const el = document.getElementById(id);
+            if (el) el.textContent = text;
+          };
+
+          setText("paper-equity", paperState.equity.toFixed(2));
+          setText("paper-cash", paperState.cash.toFixed(2));
+          setText("paper-pnl", (totalPnl >= 0 ? "+" : "") + totalPnl.toFixed(4));
+          setText("paper-trade-count", paperState.trades.length);
+          setText("paper-last-action", paperState.lastAction);
+
+          const positionState = document.getElementById("paper-position-state");
+          if (positionState) {
+            positionState.classList.remove("chip-up", "chip-down", "chip-neutral");
+            if (pos) {
+              positionState.classList.add(pos.side === "short" ? "chip-down" : "chip-up");
+              positionState.textContent = pos.side === "short" ? "숏 보유" : "롱 보유";
+            } else {
+              positionState.classList.add("chip-neutral");
+              positionState.textContent = "미보유";
+            }
+          }
+          setText(
+            "paper-position-size",
+            pos ? (pos.side === "short" ? "숏 " : "롱 ") + Math.abs(pos.qty).toFixed(4) + " @ " + pos.entryPrice.toFixed(2) : "-",
+          );
+          setText("paper-entry-price", pos ? pos.entryPrice.toFixed(2) : "-");
+          setText("paper-current-price", price ? price.toFixed(2) : "-");
+          setText(
+            "paper-unrealized",
+            pos ? unrealized.toFixed(4) + " (" + unrealizedPct.toFixed(2) + "%)" : "-",
+          );
+
+          const probChip = document.getElementById("paper-prob-chip");
+          if (probChip) {
+            probChip.classList.remove("chip-up", "chip-down", "chip-neutral");
+            if (probVal >= paperConfig.entryThreshold) {
+              probChip.classList.add("chip-up");
+            } else if (probVal <= paperConfig.exitThreshold) {
+              probChip.classList.add("chip-down");
+            } else {
+              probChip.classList.add("chip-neutral");
+            }
+            probChip.textContent = Number.isFinite(probVal) ? "prob " + probVal.toFixed(3) : "prob";
+          }
+          setText("paper-prob", Number.isFinite(probVal) ? probVal.toFixed(3) : "-");
+          setText("paper-horizon", payload?.label_horizon ?? "-");
+          setText("paper-updated", payload?.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : "-");
+          setText("paper-price", price ? price.toFixed(2) : "-");
+        }
+
+        function handlePaperTick(payload) {
+          if (!payload) return;
+          const price = parseFloat(payload.latest?.close || 0);
+          const prob = parseFloat(payload.prob_ensemble || 0);
+          if (!price || Number.isNaN(price)) {
+            renderPaperState(payload);
+            return;
+          }
+          const nowLabel = payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+          const pos = paperState.position;
+
+          if (!pos && prob >= paperConfig.entryThreshold) {
+            const notional = paperState.cash * (paperConfig.orderPct / 100);
+            if (notional > 0) {
+              const qty = notional / price;
+              paperState.cash -= notional;
+              paperState.position = { qty, entryPrice: price, entryProb: prob, entryTime: nowLabel, side: "long" };
+              paperState.lastAction = "롱 진입 (" + prob.toFixed(3) + ")";
+            }
+          } else if (!pos && prob <= paperConfig.shortEntryThreshold) {
+            const notional = paperState.cash * (paperConfig.orderPct / 100);
+            if (notional > 0) {
+              const qty = -(notional / price);
+              paperState.cash += notional; // 숏 체결 금액 유입
+              paperState.position = { qty, entryPrice: price, entryProb: prob, entryTime: nowLabel, side: "short" };
+              paperState.lastAction = "숏 진입 (" + prob.toFixed(3) + ")";
+            }
+          } else if (pos) {
+            const entryNotional = Math.abs(pos.entryPrice * pos.qty);
+            const pnl = (price - pos.entryPrice) * pos.qty;
+            const pnlPct = entryNotional > 0 ? (pnl / entryNotional) * 100 : 0;
+            const tpHit = paperConfig.takeProfitPct > 0 && pnlPct >= paperConfig.takeProfitPct;
+            const slHit = pnlPct <= paperConfig.stopLossPct;
+            const probExit =
+              (pos.side === "long" && prob <= paperConfig.exitThreshold) ||
+              (pos.side === "short" && prob >= paperConfig.shortExitThreshold);
+            if (tpHit || slHit || probExit) {
+              const exitValue = price * pos.qty;
+              const pnlPctTrade = pnlPct;
+              paperState.cash += exitValue;
+              paperState.realizedPnl += pnl;
+              paperState.trades.push({
+                side: pos.side,
+                entryTime: pos.entryTime,
+                exitTime: nowLabel,
+                entry: pos.entryPrice,
+                exit: price,
+                pnl,
+                pnlPct: pnlPctTrade,
+                entryProb: pos.entryProb,
+                exitProb: prob,
+              });
+              if (paperState.trades.length > 50) {
+                paperState.trades.shift();
+              }
+              paperState.position = null;
+              if (tpHit) {
+                paperState.lastAction = "익절 청산";
+              } else if (slHit) {
+                paperState.lastAction = "손절 청산";
+              } else {
+                paperState.lastAction = (pos.side === "short" ? "숏" : "롱") + " prob 청산";
+              }
+            } else {
+              paperState.lastAction = (pos.side === "short" ? "숏" : "롱") + " 보유 (prob " + prob.toFixed(3) + ")";
+            }
+          }
+
+          renderPaperState(payload);
+          renderPaperTrades();
+        }
+
+        async function fetchPaperTick() {
+          if (!paperActive || activeTab !== "paper") return;
+          if (paperStatus) {
+            paperStatus.textContent = "실시간 예측 요청 중…";
+          }
+          if (paperLiveDot) {
+            paperLiveDot.classList.add("off");
+          }
+          try {
+            const data = await fetchHybridData();
+            handlePaperTick(data);
+            if (paperLiveDot) {
+              paperLiveDot.classList.remove("off");
+            }
+            if (paperStatus) {
+              paperStatus.textContent = "prob 갱신 " + new Date().toLocaleTimeString();
+            }
+          } catch (err) {
+            if (paperStatus) {
+              paperStatus.textContent = "에러: " + err.message;
+            }
+          }
+        }
+
+        function startPaperTrading() {
+          if (activeTab !== "paper") return;
+          applyPaperConfigFromInputs();
+          paperActive = true;
+          if (paperStatus) {
+            paperStatus.textContent = "실시간 시뮬레이션 시작";
+          }
+          if (paperLiveDot) {
+            paperLiveDot.classList.remove("off");
+          }
+          fetchPaperTick();
+          if (paperTimer) {
+            clearInterval(paperTimer);
+          }
+          paperTimer = setInterval(fetchPaperTick, 3000);
+        }
+
+        function stopPaperTrading() {
+          paperActive = false;
+          if (paperTimer) {
+            clearInterval(paperTimer);
+            paperTimer = null;
+          }
+          if (paperStatus) {
+            paperStatus.textContent = "탭 비활성 · 시뮬레이션 정지";
+          }
+          if (paperLiveDot) {
+            paperLiveDot.classList.add("off");
+          }
+        }
+
+        function initPaperForm() {
+          const defaults = {
+            "paper-initial-balance": paperConfig.initialBalance,
+            "paper-order-pct": paperConfig.orderPct,
+            "paper-entry-threshold": paperConfig.entryThreshold,
+            "paper-short-entry": paperConfig.shortEntryThreshold,
+            "paper-exit-threshold": paperConfig.exitThreshold,
+            "paper-short-exit": paperConfig.shortExitThreshold,
+            "paper-tp": paperConfig.takeProfitPct,
+            "paper-sl": paperConfig.stopLossPct,
+          };
+          Object.entries(defaults).forEach(function ([id, value]) {
+            const el = document.getElementById(id);
+            if (el && (el.value === "" || el.value === null)) {
+              el.value = value;
+            }
+          });
+          applyPaperConfigFromInputs();
+          resetPaperState(true);
+          const form = document.getElementById("paper-config");
+          if (form) {
+            form.addEventListener("change", function () {
+              applyPaperConfigFromInputs();
+            });
+          }
+          const resetBtn = document.getElementById("paper-reset-btn");
+          if (resetBtn) {
+            resetBtn.addEventListener("click", function () {
+              applyPaperConfigFromInputs();
+              resetPaperState(true);
+            });
+          }
         }
 
         function initTimeframeButtons() {
@@ -1441,57 +1942,72 @@
             btn.addEventListener("click", function () {
               const tf = btn.getAttribute("data-tf");
               if (!tf || tf === currentTf) return;
+              currentTf = tf;
               buttons.forEach(function (b) {
                 b.classList.remove("active");
               });
               btn.classList.add("active");
-              startBinanceMode(tf);
+              if (activeTab === "binance") {
+                startBinanceMode(tf);
+              }
             });
           });
         }
 
         function initTabs() {
+          const tabsContainer = document.querySelector(".tabs");
           const tabs = document.querySelectorAll(".tab-btn");
           const contents = document.querySelectorAll(".tab-content");
-          const tabsContainer = document.querySelector(".tabs");
+
+          function activate(target) {
+            if (!target) return;
+            activeTab = target;
+
+            tabs.forEach(function (t) {
+              t.classList.remove("active");
+            });
+            contents.forEach(function (c) {
+              c.classList.remove("active");
+            });
+            const btn = document.querySelector('.tab-btn[data-tab="' + target + '"]');
+            if (btn) {
+              btn.classList.add("active");
+            }
+            const pane = document.getElementById("tab-" + target);
+            if (pane) {
+              pane.classList.add("active");
+            }
+
+            stopBinanceMode();
+            stopHybridPolling();
+            stopPaperTrading();
+
+            if (target === "binance") {
+              startBinanceMode(currentTf);
+            } else if (target === "hybrid") {
+              startHybridPolling();
+            } else if (target === "paper") {
+              startPaperTrading();
+            }
+          }
+
           tabs.forEach(function (tab) {
             tab.addEventListener("click", function () {
               const target = tab.getAttribute("data-tab");
-              if (!target) return;
-              tabs.forEach(function (t) {
-                t.classList.remove("active");
-              });
-              contents.forEach(function (c) {
-                c.classList.remove("active");
-              });
-              tab.classList.add("active");
-              const el = document.getElementById("tab-" + target);
-              if (el) {
-                el.classList.add("active");
-              }
-              if (target === "hybrid") {
-                startHybridPolling();
-              } else {
-                stopHybridPolling();
-              }
+              activate(target);
             });
           });
 
-          const activeTab = tabsContainer ? tabsContainer.getAttribute("data-active-tab") : null;
-          if (activeTab === "model" || activeTab === "hybrid") {
-            const selected = document.querySelector('.tab-btn[data-tab="' + activeTab + '"]');
-            if (selected) {
-              selected.click();
-            }
-          }
+          const requested = tabsContainer ? tabsContainer.getAttribute("data-active-tab") : null;
+          const initial =
+            (requested && document.querySelector('.tab-btn[data-tab="' + requested + '"]')?.getAttribute("data-tab")) ||
+            (tabs[0] ? tabs[0].getAttribute("data-tab") : "binance");
+          activate(initial);
         }
 
+        initPaperForm();
         initTimeframeButtons();
         initTabs();
-        startBinanceMode(currentTf);
-        if (document.querySelector('.tab-btn[data-tab="hybrid"]')?.classList.contains("active")) {
-          startHybridPolling();
-        }
       })();
     </script>
   </body>
