@@ -34,7 +34,7 @@ CHART_CANDLES = 300
 HYBRID_CACHE: dict = {}
 HYBRID_WORKERS: dict[str, "HybridStreamWorker"] = {}
 HYBRID_LIVE_CACHE: dict[str, dict] = {}
-HYBRID_LIVE_CACHE_TTL = 1.5
+HYBRID_LIVE_CACHE_TTL = 0.5
 
 
 def _load_model_result() -> tuple[dict, pd.DataFrame, dict]:
@@ -532,12 +532,18 @@ def _fetch_binance_klines(symbol: str, interval: str = "1m", limit: int = 500) -
     return df
 
 
-def _run_hybrid_live_prediction(symbol: str = "BTCUSDT") -> dict:
+def _run_hybrid_live_prediction(symbol: str = "BTCUSDT", label_horizon_override: int | None = None) -> dict:
     """Fetch recent 1m candles, build features, and run hybrid ensemble inference."""
     t0 = time.time()
     artifacts = _get_hybrid_artifacts()
     lookback = int(artifacts["lookback"])
-    label_horizon = int(artifacts["label_horizon"])
+    label_horizon_meta = int(artifacts["label_horizon"])
+    label_horizon = label_horizon_meta
+    if label_horizon_override is not None:
+        try:
+            label_horizon = max(1, min(60, int(label_horizon_override)))
+        except ValueError:
+            label_horizon = label_horizon_meta
     feature_columns: list[str] = artifacts["feature_columns"]
     feature_mean: np.ndarray = artifacts["feature_mean"]
     std_safe: np.ndarray = artifacts["feature_std_safe"]
@@ -631,14 +637,14 @@ def _run_hybrid_live_prediction(symbol: str = "BTCUSDT") -> dict:
     }
 
 
-def _get_cached_hybrid_live(symbol: str = "BTCUSDT") -> dict:
+def _get_cached_hybrid_live(symbol: str = "BTCUSDT", label_horizon: int | None = None) -> dict:
     """Return cached hybrid live payload within TTL, otherwise compute fresh."""
-    key = symbol.upper()
+    key = f"{symbol.upper()}::h{label_horizon or 'meta'}"
     now = time.time()
     cached = HYBRID_LIVE_CACHE.get(key)
     if cached and (now - cached.get("ts", 0) < HYBRID_LIVE_CACHE_TTL):
         return cached["payload"]
-    payload = _run_hybrid_live_prediction(symbol=key)
+    payload = _run_hybrid_live_prediction(symbol=symbol, label_horizon_override=label_horizon)
     HYBRID_LIVE_CACHE[key] = {"ts": now, "payload": payload}
     return payload
 
@@ -646,9 +652,10 @@ def _get_cached_hybrid_live(symbol: str = "BTCUSDT") -> dict:
 class HybridStreamWorker:
     """Background worker that refreshes hybrid predictions and broadcasts to listeners."""
 
-    def __init__(self, symbol: str = "BTCUSDT", interval_ms: int = 2000) -> None:
+    def __init__(self, symbol: str = "BTCUSDT", interval_ms: int = 2000, label_horizon: int | None = None) -> None:
         self.symbol = symbol.upper()
         self.interval = max(0.5, interval_ms / 1000.0)
+        self.label_horizon = label_horizon
         self.listeners: set[queue.SimpleQueue] = set()
         self.lock = threading.Lock()
         self.thread: threading.Thread | None = None
@@ -680,9 +687,10 @@ class HybridStreamWorker:
                 if not self.running:
                     break
             try:
-                payload = _run_hybrid_live_prediction(symbol=self.symbol)
+                payload = _run_hybrid_live_prediction(symbol=self.symbol, label_horizon_override=self.label_horizon)
                 self.last_payload = payload
-                HYBRID_LIVE_CACHE[self.symbol] = {"ts": time.time(), "payload": payload}
+                cache_key = f"{self.symbol}::h{self.label_horizon or 'meta'}"
+                HYBRID_LIVE_CACHE[cache_key] = {"ts": time.time(), "payload": payload}
                 self._broadcast(payload)
             except Exception as exc:  # noqa: BLE001
                 self._broadcast({"error": str(exc), "symbol": self.symbol})
@@ -706,11 +714,11 @@ class HybridStreamWorker:
             self.stop()
 
 
-def _get_hybrid_worker(symbol: str, interval_ms: int = 2000) -> HybridStreamWorker:
-    key = f"{symbol.upper()}::{interval_ms}"
+def _get_hybrid_worker(symbol: str, interval_ms: int = 2000, label_horizon: int | None = None) -> HybridStreamWorker:
+    key = f"{symbol.upper()}::{interval_ms}::h{label_horizon or 'meta'}"
     worker = HYBRID_WORKERS.get(key)
     if worker is None:
-        worker = HybridStreamWorker(symbol=symbol, interval_ms=interval_ms)
+        worker = HybridStreamWorker(symbol=symbol, interval_ms=interval_ms, label_horizon=label_horizon)
         HYBRID_WORKERS[key] = worker
     return worker
 
@@ -837,8 +845,15 @@ def candles_api(request: HttpRequest) -> HttpResponse:
 def hybrid_live_api(request: HttpRequest) -> HttpResponse:
     """Hybrid ensemble로 Binance 1분 봉 기반 다음 분 예측을 반환합니다."""
     symbol = request.GET.get("symbol", "BTCUSDT")
+    label_horizon_raw = request.GET.get("label_horizon")
+    label_horizon = None
+    if label_horizon_raw:
+        try:
+            label_horizon = max(1, min(60, int(label_horizon_raw)))
+        except ValueError:
+            label_horizon = None
     try:
-        result = _get_cached_hybrid_live(symbol=symbol)
+        result = _get_cached_hybrid_live(symbol=symbol, label_horizon=label_horizon)
         return JsonResponse(result)
     except Exception as exc:  # noqa: BLE001
         return JsonResponse({"error": str(exc)}, status=500)
@@ -848,7 +863,14 @@ def hybrid_live_stream(request: HttpRequest) -> HttpResponse:
     """Server-Sent Events로 하이브리드 예측을 지속 스트리밍."""
     symbol = request.GET.get("symbol", "BTCUSDT")
     interval_ms = max(500, min(5000, int(request.GET.get("interval_ms", "1000") or "1000")))
-    worker = _get_hybrid_worker(symbol, interval_ms=interval_ms)
+    label_horizon_raw = request.GET.get("label_horizon")
+    label_horizon = None
+    if label_horizon_raw:
+        try:
+            label_horizon = max(1, min(60, int(label_horizon_raw)))
+        except ValueError:
+            label_horizon = None
+    worker = _get_hybrid_worker(symbol, interval_ms=interval_ms, label_horizon=label_horizon)
 
     def event_stream():
         q = worker.register()

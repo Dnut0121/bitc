@@ -1163,6 +1163,52 @@
           setStatus("Binance 탭 비활성 / 연결 안 됨");
         }
 
+        function startPriceStream() {
+          if (priceWs) {
+            priceWs.close();
+            priceWs = null;
+          }
+          try {
+            priceWs = new WebSocket("wss://stream.binance.com:9443/ws/btcusdt@miniTicker");
+          } catch (e) {
+            priceWs = null;
+            return;
+          }
+          priceWs.onmessage = function (event) {
+            try {
+              const msg = JSON.parse(event.data);
+              const price = parseFloat(msg.c);
+              if (!Number.isNaN(price)) {
+                lastPrice = price;
+                // 최신 prob/메트릭과 조합해 현재가만 새로 고침
+                const base = lastHybridPayload ? { ...lastHybridPayload } : {};
+                const latest = { ...(base.latest || {}), close: price };
+                base.latest = latest;
+                handlePaperTick(base);
+                if (activeTab === "hybrid" && hybridLiveDot) {
+                  hybridLiveDot.classList.remove("off");
+                }
+              }
+            } catch (e) {
+              // ignore parse errors
+            }
+          };
+          priceWs.onerror = function () {
+            stopPriceStream();
+          };
+        }
+
+        function stopPriceStream() {
+          if (priceWs) {
+            try {
+              priceWs.close();
+            } catch (e) {
+              // ignore
+            }
+            priceWs = null;
+          }
+        }
+
         function renderTable(buffer) {
           const body = document.getElementById("market-table-body");
           if (!body) return;
@@ -1365,8 +1411,14 @@
         let hybridProbSeries = null;
         let hybridProbOnlyChart = null;
         let hybridProbOnlySeries = null;
+        const HYBRID_INTERVAL_MS = 1000;
+        const HYBRID_LABEL_HORIZON = 1;
+        let lastHybridPayload = null;
         let hybridTimer = null;
         let hybridActive = false;
+        let hybridEventSource = null;
+        let priceWs = null;
+        let lastPrice = null;
 
         function ensureHybridChart() {
           if (hybridChart) return;
@@ -1510,6 +1562,7 @@
             const el = document.getElementById(id);
             if (el) el.textContent = text;
           };
+          const livePrice = lastPrice != null ? lastPrice : payload.latest?.close;
           setText("hybrid-prob-ensemble", (payload.prob_ensemble || 0).toFixed(3));
           setText("hybrid-prob-lstm", (payload.prob_lstm || 0).toFixed(3));
           setText("hybrid-prob-xgb", (payload.prob_xgb || 0).toFixed(3));
@@ -1521,7 +1574,7 @@
           setText("hybrid-updated", payload.timestamp ? new Date(payload.timestamp).toLocaleTimeString() : "-");
           setText("hybrid-next-time", payload.next_target_time ? "목표: " + new Date(payload.next_target_time).toLocaleTimeString() : "-");
           if (payload.latest) {
-            setText("hybrid-last-close", parseFloat(payload.latest.close || 0).toFixed(2));
+            setText("hybrid-last-close", livePrice != null ? parseFloat(livePrice || 0).toFixed(2) : "-");
             setText("hybrid-last-open", parseFloat(payload.latest.open || 0).toFixed(2));
             setText("hybrid-last-high", parseFloat(payload.latest.high || 0).toFixed(2));
             setText("hybrid-last-low", parseFloat(payload.latest.low || 0).toFixed(2));
@@ -1536,7 +1589,7 @@
         }
 
         async function fetchHybridData() {
-          const res = await fetch("/api/hybrid-live/");
+          const res = await fetch("/api/hybrid-live/?label_horizon=" + HYBRID_LABEL_HORIZON);
           const data = await res.json();
           if (!res.ok || data.error) {
             throw new Error(data.error || "hybrid API error");
@@ -1544,40 +1597,57 @@
           return data;
         }
 
-        async function fetchHybridPrediction() {
-          if (!hybridActive || activeTab !== "hybrid") return;
-          if (hybridStatus) {
-            hybridStatus.textContent = "실시간 예측 요청 중…";
+        function applyHybridPayload(data, sourceLabel) {
+          if (lastPrice != null) {
+            data.latest = { ...(data.latest || {}), close: lastPrice };
           }
-          if (hybridLiveDot) {
-            hybridLiveDot.classList.add("off");
-          }
-          try {
-            const data = await fetchHybridData();
+          lastHybridPayload = data;
+          if (activeTab === "hybrid") {
             setHybridMetrics(data);
             renderHybridChart(data);
             renderHybridTable(data.prob_samples || []);
             if (hybridLiveDot) {
               hybridLiveDot.classList.remove("off");
             }
-          } catch (err) {
             if (hybridStatus) {
+              const label = sourceLabel ? sourceLabel + " · " : "";
+              hybridStatus.textContent = label + "갱신 " + new Date().toLocaleTimeString();
+            }
+          }
+          if (paperActive && activeTab === "paper") {
+            handlePaperTick(data);
+          }
+        }
+
+        async function fetchHybridPrediction(label) {
+          if (!hybridActive && activeTab !== "paper") return;
+          if (hybridStatus && activeTab === "hybrid") {
+            hybridStatus.textContent = "실시간 예측 요청 중…";
+          }
+          if (hybridLiveDot && activeTab === "hybrid") {
+            hybridLiveDot.classList.add("off");
+          }
+          try {
+            const data = await fetchHybridData();
+            applyHybridPayload(data, label || "폴링");
+          } catch (err) {
+            if (hybridStatus && activeTab === "hybrid") {
               hybridStatus.textContent = "에러: " + err.message;
             }
+            startHybridPolling(); // fallback if SSE failed
           }
         }
 
         function startHybridPolling() {
-          if (activeTab !== "hybrid") return;
+          if (activeTab !== "hybrid" && activeTab !== "paper") return;
           hybridActive = true;
-          if (hybridStatus) {
-            hybridStatus.textContent = "실시간 예측 대기 중…";
-          }
-          fetchHybridPrediction();
+          fetchHybridPrediction("폴링");
           if (hybridTimer) {
             clearInterval(hybridTimer);
           }
-          hybridTimer = setInterval(fetchHybridPrediction, 3000);
+          hybridTimer = setInterval(function () {
+            fetchHybridPrediction("폴링");
+          }, HYBRID_INTERVAL_MS);
         }
 
         function stopHybridPolling() {
@@ -1586,8 +1656,54 @@
             clearInterval(hybridTimer);
             hybridTimer = null;
           }
-          if (hybridStatus) {
-            hybridStatus.textContent = "탭 비활성 · 예측 중지";
+        }
+
+        function startHybridStream() {
+          if (activeTab !== "hybrid" && activeTab !== "paper") return;
+          stopHybridStream();
+          hybridActive = true;
+          if (!window.EventSource) {
+            startHybridPolling();
+            return;
+          }
+          if (hybridStatus && activeTab === "hybrid") {
+            hybridStatus.textContent = "SSE 연결 중…";
+          }
+          hybridEventSource = new EventSource(
+            "/api/hybrid-live-stream?interval_ms=" + HYBRID_INTERVAL_MS + "&label_horizon=" + HYBRID_LABEL_HORIZON,
+          );
+          hybridEventSource.onmessage = function (event) {
+            try {
+              const data = JSON.parse(event.data);
+              applyHybridPayload(data, "스트림");
+            } catch (e) {
+              if (hybridEventSource) {
+                hybridEventSource.close();
+                hybridEventSource = null;
+              }
+              startHybridPolling();
+            }
+          };
+          hybridEventSource.onerror = function () {
+            if (hybridEventSource) {
+              hybridEventSource.close();
+              hybridEventSource = null;
+            }
+            startHybridPolling();
+          };
+          // 즉시 한 번 당겨서 초기화
+          fetchHybridPrediction("초기화");
+        }
+
+        function stopHybridStream() {
+          hybridActive = false;
+          if (hybridEventSource) {
+            hybridEventSource.close();
+            hybridEventSource = null;
+          }
+          stopHybridPolling();
+          if (hybridStatus && activeTab === "hybrid") {
+            hybridStatus.textContent = "탭 비활성 · 중지";
           }
           if (hybridLiveDot) {
             hybridLiveDot.classList.add("off");
@@ -1715,7 +1831,7 @@
         }
 
         function renderPaperState(payload) {
-          const price = payload?.latest ? parseFloat(payload.latest.close || 0) : null;
+          const price = payload?.latest && payload.latest.close != null ? parseFloat(payload.latest.close) : lastPrice;
           const probVal = payload ? parseFloat(payload.prob_ensemble || 0) : null;
           const pos = paperState.position;
           const positionValue = pos && price ? pos.qty * price : 0;
@@ -1777,7 +1893,7 @@
 
         function handlePaperTick(payload) {
           if (!payload) return;
-          const price = parseFloat(payload.latest?.close || 0);
+          const price = payload?.latest && payload.latest.close != null ? parseFloat(payload.latest.close) : lastPrice;
           const prob = parseFloat(payload.prob_ensemble || 0);
           if (!price || Number.isNaN(price)) {
             renderPaperState(payload);
@@ -1845,6 +1961,12 @@
 
           renderPaperState(payload);
           renderPaperTrades();
+          if (paperLiveDot) {
+            paperLiveDot.classList.remove("off");
+          }
+          if (paperStatus) {
+            paperStatus.textContent = "실시간 수신 " + nowLabel;
+          }
         }
 
         async function fetchPaperTick() {
@@ -1881,25 +2003,19 @@
           if (paperLiveDot) {
             paperLiveDot.classList.remove("off");
           }
-          fetchPaperTick();
-          if (paperTimer) {
-            clearInterval(paperTimer);
-          }
-          paperTimer = setInterval(fetchPaperTick, 3000);
+          startHybridStream();
+          startPriceStream();
         }
 
         function stopPaperTrading() {
           paperActive = false;
-          if (paperTimer) {
-            clearInterval(paperTimer);
-            paperTimer = null;
-          }
           if (paperStatus) {
             paperStatus.textContent = "탭 비활성 · 시뮬레이션 정지";
           }
           if (paperLiveDot) {
             paperLiveDot.classList.add("off");
           }
+          stopPriceStream();
         }
 
         function initPaperForm() {
@@ -1979,13 +2095,13 @@
             }
 
             stopBinanceMode();
-            stopHybridPolling();
+            stopHybridStream();
             stopPaperTrading();
 
             if (target === "binance") {
               startBinanceMode(currentTf);
             } else if (target === "hybrid") {
-              startHybridPolling();
+              startHybridStream();
             } else if (target === "paper") {
               startPaperTrading();
             }

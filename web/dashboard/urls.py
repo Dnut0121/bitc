@@ -8,5 +8,5 @@ urlpatterns = [
     path("", views.index, name="dashboard-index"),
     path("api/candles/", views.candles_api, name="dashboard-candles-api"),
     path("api/hybrid-live/", views.hybrid_live_api, name="dashboard-hybrid-live-api"),
+    path("api/hybrid-live-stream/", views.hybrid_live_stream, name="dashboard-hybrid-live-stream"),
 ]
-
